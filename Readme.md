@@ -446,18 +446,34 @@ applied without prompting. Subtitle cleaning follows
 
 ## Windows Send To
 
+`ARABIC_SUBS.bat` in this folder is the Arabic Edition launcher. It opens the
+TUI with Arabic as the language and every configured provider as the engine,
+and it takes the video from whichever of these you use:
+
+- **Drag and drop.** Drop a video file onto the batch file to search for that
+  file, or drop a folder to search it. Paths containing spaces or Arabic
+  characters are passed through unchanged.
+- **Double-click.** Double-clicked with nothing to drop, it opens a Windows
+  file picker offering `mkv`, `mp4`, `avi`, `mov`, `m4v`, `ts`, and `webm`.
+
+It does not turn on auto-download: the TUI opens as usual and you choose the
+subtitle yourself. Whether a result is selected for you still comes from
+`general.auto_selection` in your `config.yaml`, which the launcher leaves alone.
+The interpreter it runs is set on the `PYTHON=` line near the top of the file;
+edit that line if Python lives somewhere other than `C:\Python314`.
+
 The included `1_download_subs.bat` is configured for this repository's original
 local path. Edit its paths before using it elsewhere.
 
-To add it to the Windows Send To menu:
+To add either launcher to the Windows Send To menu:
 
 1. Press `Win+R`.
 2. Enter `shell:sendto`.
-3. Put a shortcut to the edited batch file in that folder.
+3. Put a shortcut to the batch file in that folder.
 
-You can then right-click a video or folder and send it to the downloader. Set
-`general.no_tui: true` if you prefer the no-TUI CLI for this workflow. Also set
-a non-`ask` backend for unattended use.
+You can then right-click a video or folder and send it to the downloader. For
+`1_download_subs.bat`, set `general.no_tui: true` if you prefer the no-TUI CLI
+for this workflow, and set a non-`ask` backend for unattended use.
 
 ## Linux and macOS (run from anywhere)
 

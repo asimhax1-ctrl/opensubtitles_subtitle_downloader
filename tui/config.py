@@ -18,6 +18,8 @@ from tui.domain import EngineMode, Provider
 SUPPORTED_GENERAL_FIELDS = {
     "preferred_backend",
     "default_language",
+    "fallback_language",
+    "auto_fallback_download",
     "recursive_search",
     "subtitle_output_directory",
     "skip_interactive_menu",
@@ -33,17 +35,25 @@ SECRET_FIELDS = {"username", "password", "api_key", "user_agent"}
 
 @dataclass
 class GeneralConfig:
-    preferred_backend: EngineMode = EngineMode.ASK
-    default_language: str = ""
+    preferred_backend: EngineMode = EngineMode.ALL_PROVIDERS
+    default_language: str = "ar"
     recursive_search: bool = False
     subtitle_output_directory: str = ""
     skip_interactive_menu: bool = False
-    sync_audio_to_subs: str = "ask"
+    # Normalized token (always | never | ask), matching the config-tab Select's option
+    # values. The on-disk token is true/false/ask and is mapped in _prepare().
+    sync_audio_to_subs: str = "never"
     auto_selection: bool = False
     opt_force_utf8: bool = True
     no_tui: bool = False
     hearing_impaired: str = "include"
     show_ai_translated: bool = True
+    # Language searched when the target language yields nothing. Empty disables
+    # fallback searching entirely.
+    fallback_language: str = "en"
+    # Opt in to downloading the best fallback candidate automatically. Default off:
+    # nothing is downloaded in a language the user did not ask for.
+    auto_fallback_download: bool = False
     media_extensions_include: list[str] = field(default_factory=list)
     media_extensions_exclude: list[str] = field(default_factory=list)
 
@@ -156,12 +166,12 @@ class ConfigRepository:
         if not isinstance(media_extensions_raw, MutableMapping):
             media_extensions_raw = {}
         preferred_backend = _safe_mode(
-            general_raw.get("preferred_backend", EngineMode.ASK.value)
+            general_raw.get("preferred_backend", EngineMode.ALL_PROVIDERS.value)
         )
         general = GeneralConfig(
             preferred_backend=preferred_backend,
             default_language=str(
-                general_raw.get("default_language", "") or ""
+                general_raw.get("default_language", "ar") or ""
             ).strip().lower(),
             recursive_search=bool(general_raw.get("recursive_search", False)),
             subtitle_output_directory=str(
@@ -169,7 +179,7 @@ class ConfigRepository:
             ).strip(),
             skip_interactive_menu=bool(general_raw.get("skip_interactive_menu", False)),
             sync_audio_to_subs=normalize_sync_policy(
-                general_raw.get("sync_audio_to_subs", "ask")
+                general_raw.get("sync_audio_to_subs", False)
             ),
             auto_selection=bool(general_raw.get("auto_selection", False)),
             opt_force_utf8=bool(general_raw.get("opt_force_utf8", True)),
@@ -178,6 +188,12 @@ class ConfigRepository:
                 general_raw.get("hearing_impaired", "include")
             ).lower(),
             show_ai_translated=bool(general_raw.get("show_ai_translated", True)),
+            fallback_language=str(
+                general_raw.get("fallback_language", "en") or ""
+            ).strip().lower(),
+            auto_fallback_download=bool(
+                general_raw.get("auto_fallback_download", False)
+            ),
             media_extensions_include=[
                 str(value)
                 for value in (media_extensions_raw.get("include") or [])

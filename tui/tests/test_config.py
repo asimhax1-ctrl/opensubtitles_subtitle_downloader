@@ -1,6 +1,6 @@
 from ruamel.yaml import YAML
 
-from tui.config import ConfigRepository
+from tui.config import SUPPORTED_GENERAL_FIELDS, ConfigRepository
 from tui.domain import EngineMode, Provider
 
 CONFIG_TEXT = """\
@@ -8,6 +8,8 @@ CONFIG_TEXT = """\
 general:
   preferred_backend: ask  # preferred provider
   default_language: ar
+  fallback_language: en
+  auto_fallback_download: false
   recursive_search: true
   subtitle_output_directory: subtitle-cache
   skip_interactive_menu: false
@@ -95,7 +97,7 @@ def test_config_diff_never_contains_credentials(tmp_path):
 def test_missing_config_loads_safe_defaults(tmp_path):
     config = ConfigRepository(tmp_path / "missing.yaml").load()
 
-    assert config.general.preferred_backend is EngineMode.ASK
+    assert config.general.preferred_backend is EngineMode.ALL_PROVIDERS
     assert set(config.providers) == set(Provider)
 
 
@@ -117,6 +119,8 @@ def test_all_providers_round_trips_canonically(tmp_path):
     assert set(saved["general"]) == {
         "preferred_backend",
         "default_language",
+        "fallback_language",
+        "auto_fallback_download",
         "recursive_search",
         "subtitle_output_directory",
         "skip_interactive_menu",
@@ -144,14 +148,90 @@ def test_save_removes_obsolete_duplicate_backend_key(tmp_path):
     saved = YAML(typ="safe").load(path.read_text(encoding="utf-8"))
     assert saved["general"] == {
         "preferred_backend": "all-providers",
-        "default_language": "",
+        "default_language": "ar",
+        "fallback_language": "en",
+        "auto_fallback_download": False,
         "recursive_search": False,
         "subtitle_output_directory": "",
         "skip_interactive_menu": False,
-        "sync_audio_to_subs": "ask",
+        "sync_audio_to_subs": False,
         "auto_selection": False,
         "opt_force_utf8": True,
         "no_tui": False,
         "hearing_impaired": "include",
         "show_ai_translated": True,
     }
+
+
+# --- Arabic Edition defaults ----------------------------------------------
+
+OMITTED_GENERAL = """
+general:
+  recursive_search: false
+"""
+
+EXPLICIT_LEGACY_GENERAL = """
+general:
+  default_language: en
+  sync_audio_to_subs: ask
+  preferred_backend: ask
+  fallback_language: ""
+  auto_fallback_download: true
+"""
+
+
+def test_new_defaults_apply_when_general_omits_the_keys(tmp_path):
+    # Proves each inline .get() fallback in load() was updated, not only the
+    # dataclass default -- a config file without the key must still get the new value.
+    path = tmp_path / "config.yaml"
+    path.write_text(OMITTED_GENERAL, encoding="utf-8")
+
+    general = ConfigRepository(path).load().general
+
+    assert general.default_language == "ar"
+    assert general.sync_audio_to_subs == "never"
+    assert general.preferred_backend is EngineMode.ALL_PROVIDERS
+
+
+def test_explicit_legacy_values_still_load(tmp_path):
+    # The new defaults must not become overrides.
+    path = tmp_path / "config.yaml"
+    path.write_text(EXPLICIT_LEGACY_GENERAL, encoding="utf-8")
+
+    general = ConfigRepository(path).load().general
+
+    assert general.default_language == "en"
+    assert general.sync_audio_to_subs == "ask"
+    assert general.preferred_backend is EngineMode.ASK
+    assert general.fallback_language == ""
+    assert general.auto_fallback_download is True
+
+
+def test_fallback_fields_survive_a_round_trip(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(OMITTED_GENERAL, encoding="utf-8")
+    repository = ConfigRepository(path)
+
+    config = repository.load()
+    config.general.fallback_language = "fr"
+    config.general.auto_fallback_download = True
+    repository.save(config)
+
+    reloaded = repository.load().general
+    assert reloaded.fallback_language == "fr"
+    assert reloaded.auto_fallback_download is True
+
+
+def test_fallback_fields_are_supported_general_fields():
+    assert "fallback_language" in SUPPORTED_GENERAL_FIELDS
+    assert "auto_fallback_download" in SUPPORTED_GENERAL_FIELDS
+
+
+def test_sync_default_is_written_as_the_false_token(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(OMITTED_GENERAL, encoding="utf-8")
+    repository = ConfigRepository(path)
+
+    repository.save(repository.load())
+
+    assert "sync_audio_to_subs: false" in path.read_text(encoding="utf-8")

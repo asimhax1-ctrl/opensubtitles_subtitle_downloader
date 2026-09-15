@@ -25,6 +25,55 @@ TOKEN_STORAGE_FILE = os.path.join(CURRENT_DIR_PATH, "token.pkl")
 # or building provider search queries.
 APOSTROPHE_RE = re.compile(r"['\u2018\u2019\u02BB\u02BC`\u00B4]")
 
+# Arabic orthographic folding for matching. Providers and release groups spell the
+# same Arabic title many ways: with or without harakat, with any of the alef forms,
+# with Arabic-Indic digits. Folding them to one canonical spelling is what lets two
+# spellings of one title compare equal.
+# Matching side only -- normalize_media_name() builds provider *queries*, and folding
+# a query would remove matches rather than add them.
+ARABIC_MARKS_RE = re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
+TATWEEL_RE = re.compile(r"\u0640")
+ALEF_FORMS_RE = re.compile(r"[\u0622\u0623\u0625\u0671]")
+ARABIC_DIGITS_RE = re.compile(r"[\u0660-\u0669\u06F0-\u06F9]")
+
+# The characters _normalize_match_text keeps. Everything outside this class becomes a
+# separator, so the Arabic ranges must be listed explicitly -- otherwise the folding
+# above is undone by the very next line.
+KEEP_MATCH_CHARS_RE = re.compile(
+    r"[^0-9A-Za-z"
+    r"\u0600-\u06FF"  # Arabic
+    r"\u0750-\u077F"  # Arabic Supplement
+    r"\u08A0-\u08FF"  # Arabic Extended-A
+    r"\uFB50-\uFDFF"  # Arabic Presentation Forms-A
+    r"\uFE70-\uFEFF"  # Arabic Presentation Forms-B
+    r"]+"
+)
+
+
+def _fold_arabic_digit(match):
+    character = match.group(0)
+    base = 0x06F0 if ord(character) >= 0x06F0 else 0x0660
+    return chr(ord("0") + (ord(character) - base))
+
+
+def fold_arabic(value):
+    """Fold Arabic orthographic variants to one canonical spelling.
+
+    Removes harakat, tatweel, and Quranic marks; unifies alef, teh marbuta, and alef
+    maksura; and maps both Arabic-Indic digit blocks to ASCII. Total by construction:
+    ``None``, empty, and Latin-only input pass through unchanged, and nothing here
+    raises.
+    """
+    if not value:
+        return value
+    text = str(value)
+    text = ARABIC_MARKS_RE.sub("", text)
+    text = TATWEEL_RE.sub("", text)
+    text = ALEF_FORMS_RE.sub("\u0627", text)
+    text = text.replace("\u0629", "\u0647")
+    text = text.replace("\u0649", "\u064A")
+    return ARABIC_DIGITS_RE.sub(_fold_arabic_digit, text)
+
 
 class SubtitleUtils:
     console = Console()
@@ -337,8 +386,9 @@ class SubtitleUtils:
         text = unicodedata.normalize("NFKC", str(value or ""))
         text = re.sub(r"[\u2010-\u2015\u2212]", "-", text)
         text = APOSTROPHE_RE.sub("", text)
+        text = fold_arabic(text)
         text = text.replace("_", " ").replace(".", " ")
-        text = re.sub(r"[^0-9A-Za-z]+", " ", text)
+        text = KEEP_MATCH_CHARS_RE.sub(" ", text)
         return " ".join(text.lower().split())
 
     @staticmethod

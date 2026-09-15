@@ -6,6 +6,7 @@ import re
 import struct
 import time
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
@@ -73,6 +74,47 @@ def fold_arabic(value):
     text = text.replace("\u0629", "\u0647")
     text = text.replace("\u0649", "\u064A")
     return ARABIC_DIGITS_RE.sub(_fold_arabic_digit, text)
+
+
+# Reasons are emitted most significant first and truncated to this many. The two
+# that must never be hidden -- the episode determination and the provider -- are
+# placed inside it; only source and resolution can be dropped.
+MAX_MATCH_REASONS = 6
+
+# Display labels for release-source tokens, matched against the raw release name so
+# hyphenated forms survive. Ordered most specific first.
+SOURCE_PATTERNS = (
+    ("web-dl", "WEB-DL"),
+    ("webdl", "WEB-DL"),
+    ("webrip", "WEBRip"),
+    ("bluray", "BluRay"),
+    ("brrip", "BRRip"),
+    ("hdtv", "HDTV"),
+    ("hdrip", "HDRip"),
+    ("remux", "REMUX"),
+    ("amzn", "AMZN"),
+    ("atvp", "ATVP"),
+    ("dsnp", "DSNP"),
+    ("netflix", "NF"),
+)
+RESOLUTION_RE = re.compile(r"\b(\d{3,4}p|4k)\b", re.IGNORECASE)
+YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+@dataclass(frozen=True)
+class MatchExplanation:
+    """A release score together with the evidence that produced it."""
+
+    score: float
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _TitleMatch:
+    """A title comparison's score plus whether the fuzzy path produced it."""
+
+    score: float
+    fuzzy_matched: bool
 
 
 class SubtitleUtils:
@@ -533,6 +575,7 @@ class SubtitleUtils:
         )
         target_titles = cls._title_hypotheses(target_name)
         best = 0.0
+        fuzzy_matched = False
         for source_title in source_titles:
             source_tokens = cls._informative_title_tokens(source_title)
             if not source_tokens:
@@ -562,9 +605,11 @@ class SubtitleUtils:
                 )
                 if similarity >= 90:
                     best = max(best, 42.0)
+                    fuzzy_matched = True
                 elif similarity >= 80 and shared:
                     best = max(best, 30.0)
-        return min(best, 55.0)
+                    fuzzy_matched = True
+        return _TitleMatch(score=min(best, 55.0), fuzzy_matched=fuzzy_matched)
 
     @classmethod
     def _technical_match_score(cls, source_name, target_name):
@@ -740,13 +785,46 @@ class SubtitleUtils:
             self.console.print(f"[bold red]Error normalizing score: {e}[/]")
             return 0
 
-    def score_subtitle(self, subtitle_release_name, video_file_name, hash_match=False):
-        """Score independent filename evidence without requiring a perfect parse."""
+    @staticmethod
+    def _year_of(value):
+        match = YEAR_RE.search(str(value or ""))
+        return match.group(0) if match else ""
+
+    @staticmethod
+    def _release_reasons(release_name):
+        """Source and resolution reasons, most specific source first."""
+        text = str(release_name or "").lower()
+        reasons = []
+        for token, label in SOURCE_PATTERNS:
+            if token in text:
+                reasons.append(f"source: {label}")
+                break
+        resolution = RESOLUTION_RE.search(text)
+        if resolution:
+            reasons.append(f"resolution: {resolution.group(1)}")
+        return reasons
+
+    def explain_subtitle_match(
+        self,
+        subtitle_release_name,
+        video_file_name,
+        hash_match=False,
+    ):
+        """Score a release and report the evidence behind the number.
+
+        ``score_subtitle`` is a thin wrapper over this, so the two can never disagree.
+        Reasons are returned most significant first, capped at ``MAX_MATCH_REASONS``.
+        Provider identity is deliberately absent: it is a tiebreak applied by the
+        caller and never enters the score.
+        """
         try:
             if not subtitle_release_name or not video_file_name:
-                return 0
+                return MatchExplanation(score=0.0, reasons=())
             if hash_match:
-                return 100.0
+                return MatchExplanation(
+                    score=100.0,
+                    reasons=("exact hash match",),
+                )
 
             target_season, target_episode, target_confidence = (
                 self._episode_evidence(video_file_name)
@@ -758,13 +836,15 @@ class SubtitleUtils:
                     allow_bare=allow_bare,
                 )
             )
-            title_score = self._title_match_score(
+            title_match = self._title_match_score(
                 subtitle_release_name,
                 video_file_name,
                 source_allow_bare=allow_bare,
             )
+            title_score = title_match.score
             title_plausible = title_score >= 25
             score = title_score
+            reasons = []
 
             episode_agrees = (
                 source_episode is not None
@@ -778,6 +858,7 @@ class SubtitleUtils:
                     "low": 8.0,
                 }.get(source_confidence, 0.0)
                 score += episode_points if title_plausible else min(6.0, episode_points)
+                reasons.append("movie/episode match")
             elif (
                 title_plausible
                 and source_episode is not None
@@ -785,12 +866,19 @@ class SubtitleUtils:
                 and source_confidence in {"high", "medium"}
             ):
                 score -= 15.0
+            if source_episode is not None and target_episode is not None:
+                if not episode_agrees:
+                    reasons.append("episode mismatch")
+            elif source_episode is None and target_episode is None:
+                reasons.append("movie/episode match")
 
             if source_season is not None and target_season is not None:
                 if source_season == target_season:
                     score += 10.0 if title_plausible else 3.0
                 elif title_plausible and source_confidence == "high":
                     score -= 12.0
+                if source_season != target_season:
+                    reasons.append("season mismatch")
 
             if title_plausible and episode_agrees:
                 score += 10.0 if source_confidence != "low" else 6.0
@@ -802,10 +890,33 @@ class SubtitleUtils:
             score += technical_score if title_plausible else min(2.0, technical_score)
             if not title_plausible:
                 score = min(score, 15.0)
-            return max(0.0, min(100.0, score))
+
+            source_year = self._year_of(subtitle_release_name)
+            target_year = self._year_of(video_file_name)
+            if source_year and target_year:
+                if source_year == target_year:
+                    reasons.append(f"year match {source_year}")
+                else:
+                    reasons.append(f"year mismatch ({source_year})")
+            if title_match.fuzzy_matched:
+                reasons.append("release name match")
+            reasons.extend(self._release_reasons(subtitle_release_name))
+
+            return MatchExplanation(
+                score=max(0.0, min(100.0, score)),
+                reasons=tuple(reasons[:MAX_MATCH_REASONS]),
+            )
         except Exception as e:
             self.console.print(f"[bold red]Error scoring subtitle: {e}[/]")
-            return 0
+            return MatchExplanation(score=0.0, reasons=())
+
+    def score_subtitle(self, subtitle_release_name, video_file_name, hash_match=False):
+        """Score independent filename evidence without requiring a perfect parse."""
+        return self.explain_subtitle_match(
+            subtitle_release_name,
+            video_file_name,
+            hash_match,
+        ).score
 
     def sort_subtitle_list(self, subtitles_list, scores=None):
         try:

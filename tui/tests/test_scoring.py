@@ -1,6 +1,6 @@
 import pytest
 
-from library.subtitle_utils import SubtitleUtils, fold_arabic
+from library.subtitle_utils import MAX_MATCH_REASONS, SubtitleUtils, fold_arabic
 
 
 @pytest.fixture
@@ -205,3 +205,159 @@ def test_arabic_same_series_outranks_arabic_other_series(scorer):
     other_series = scorer.score_subtitle("باب_الحارة.S01E03.1080p.WEB-DL", query)
 
     assert same_series > other_series
+
+
+# --- Match explanations ---------------------------------------------------
+
+# Scores captured from the implementation BEFORE this refactor. Asserted verbatim
+# so the refactor is proven behavior-preserving against real values rather than
+# merely self-consistent with its own wrapper.
+PRE_REFACTOR_SCORES = [
+    ("The.Pitt.S01E01.1080p.WEB.H264-SuccessfulCrab", 99.0),
+    ("The.Pitt.S02E01.1080p.WEB.h264-ETHEL.ar", 77.0),
+    ("The.Pitt.S01E02.1080p.WEB.H264-SuccessfulCrab", 54.0),
+    ("The.Pitt.Arabic.WEB-DL", 55.0),
+    ("The.Pitt.S01E01.1080p.WEB-DL.x264", 97.0),
+    ("Anything.At.All", 0.0),
+]
+
+
+@pytest.mark.parametrize(("release", "expected"), PRE_REFACTOR_SCORES)
+def test_explanation_preserves_pre_refactor_scores(scorer, release, expected):
+    assert scorer.explain_subtitle_match(release, PITT_QUERY).score == expected
+
+
+@pytest.mark.parametrize(("release", "expected"), PRE_REFACTOR_SCORES)
+def test_score_subtitle_still_returns_pre_refactor_scores(scorer, release, expected):
+    assert scorer.score_subtitle(release, PITT_QUERY) == expected
+
+
+def test_explanation_agrees_with_score_subtitle(scorer):
+    release = "The.Pitt.S01E02.1080p.WEB.H264-SuccessfulCrab"
+
+    assert scorer.score_subtitle(release, PITT_QUERY) == (
+        scorer.explain_subtitle_match(release, PITT_QUERY).score
+    )
+
+
+def test_explanation_score_is_a_float_for_all_fixtures(scorer):
+    for release in (
+        "The.Pitt.S01E01.1080p.WEB.H264-SuccessfulCrab",
+        "The.Pitt.S02E01.1080p.WEB.h264-ETHEL.ar",
+        UNRELATED_S01E01,
+        "The.Pitt.Arabic.WEB-DL",
+    ):
+        explanation = scorer.explain_subtitle_match(release, PITT_QUERY)
+        assert isinstance(explanation.score, float)
+        assert isinstance(explanation.reasons, tuple)
+
+
+def test_hash_match_scores_100_and_reports_only_the_hash(scorer):
+    explanation = scorer.explain_subtitle_match(
+        "Anything.At.All", PITT_QUERY, hash_match=True
+    )
+
+    assert explanation.score == 100.0
+    assert explanation.reasons == ("exact hash match",)
+
+
+def test_explanation_reports_episode_match_when_both_name_the_same_episode(scorer):
+    # UNRELATED_S01E01 and PITT_QUERY both carry S01E01, so the episode agrees even
+    # though the series does not.
+    explanation = scorer.explain_subtitle_match(UNRELATED_S01E01, PITT_QUERY)
+
+    assert "movie/episode match" in explanation.reasons
+    assert "episode mismatch" not in explanation.reasons
+
+
+def test_explanation_reports_episode_mismatch_when_episodes_differ(scorer):
+    explanation = scorer.explain_subtitle_match(
+        "The.Pitt.S01E02.1080p.WEB.H264-SuccessfulCrab",
+        PITT_QUERY,
+    )
+
+    assert "episode mismatch" in explanation.reasons
+    assert "movie/episode match" not in explanation.reasons
+
+
+def test_explanation_reports_episode_match_when_neither_names_an_episode(scorer):
+    explanation = scorer.explain_subtitle_match("The.Pitt.2025.1080p", "The.Pitt.2025")
+
+    assert "movie/episode match" in explanation.reasons
+
+
+def test_explanation_reports_season_mismatch_when_seasons_differ(scorer):
+    # Same episode (S02E01 against S01E01), different season.
+    explanation = scorer.explain_subtitle_match(
+        "The.Pitt.S02E01.1080p.WEB.h264-ETHEL.ar",
+        PITT_QUERY,
+    )
+
+    assert "season mismatch" in explanation.reasons
+    assert "movie/episode match" in explanation.reasons
+
+
+def test_explanation_reports_year_match_for_agreeing_years(scorer):
+    explanation = scorer.explain_subtitle_match(
+        "Widows.Bay.2026.S01E01.ATVP.WEB-DL.2160p.HDR.H.265",
+        WIDOWS_BAY_QUERY,
+    )
+
+    assert "year match 2026" in explanation.reasons
+
+
+def test_explanation_reports_year_mismatch_for_differing_years(scorer):
+    explanation = scorer.explain_subtitle_match(
+        "Widows.Bay.2019.S01E01.1080p.WEB-DL",
+        WIDOWS_BAY_QUERY,
+    )
+
+    assert "year mismatch (2019)" in explanation.reasons
+
+
+def test_explanation_reports_release_name_match_for_a_fuzzy_title(scorer):
+    # "Widow Bay" vs "Widows Bay": the token sets {bay, widow} and {bay, widows}
+    # share a token but neither contains the other, so the fuzzy path is what
+    # establishes the title. Per the spec this reason is fuzzy-only.
+    explanation = scorer.explain_subtitle_match(
+        "Widows.Bay.S01E01.1080p.WEB-DL",
+        "Widow Bay S01E01 1080p",
+    )
+
+    assert "release name match" in explanation.reasons
+
+
+def test_explanation_omits_release_name_match_for_an_exactly_equal_title(scorer):
+    # The same release against a query whose title tokens are identical: the exact
+    # path matched, so the fuzzy-only reason must not appear.
+    explanation = scorer.explain_subtitle_match(
+        "Widows.Bay.S01E01.1080p.WEB-DL",
+        "Widows Bay S01E01 1080p",
+    )
+
+    assert "release name match" not in explanation.reasons
+
+
+def test_explanation_reports_source_and_resolution(scorer):
+    explanation = scorer.explain_subtitle_match(
+        "The.Pitt.S01E01.1080p.WEB-DL.x264",
+        PITT_QUERY,
+    )
+
+    assert "source: WEB-DL" in explanation.reasons
+    assert "resolution: 1080p" in explanation.reasons
+
+
+def test_explanation_never_exceeds_the_reason_cap(scorer):
+    explanation = scorer.explain_subtitle_match(
+        "The.Pitt.S01E01.1080p.WEB-DL.x264",
+        PITT_QUERY,
+    )
+
+    assert len(explanation.reasons) <= MAX_MATCH_REASONS
+
+
+def test_explanation_is_total_for_empty_input(scorer):
+    assert scorer.explain_subtitle_match("", PITT_QUERY).score == 0.0
+    assert scorer.explain_subtitle_match("x", "").score == 0.0
+    assert scorer.explain_subtitle_match("", PITT_QUERY).reasons == ()

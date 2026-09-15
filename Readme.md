@@ -450,9 +450,9 @@ applied without prompting. Subtitle cleaning follows
 TUI with Arabic as the language and every configured provider as the engine,
 and it takes the video from whichever of these you use:
 
-- **Drag and drop.** Drop a video file onto the batch file to search for that
-  file, or drop a folder to search it. Paths containing spaces or Arabic
-  characters are passed through unchanged.
+- **Drag and drop.** Drop one or more videos, or folders, onto the batch file
+  to search them. Paths containing spaces or Arabic characters are passed
+  through unchanged.
 - **Double-click.** Double-clicked with nothing to drop, it opens a Windows
   file picker offering `mkv`, `mp4`, `avi`, `mov`, `m4v`, `ts`, and `webm`.
 

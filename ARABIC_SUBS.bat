@@ -1,11 +1,11 @@
 @echo off
 rem  Arabic Edition launcher.
 rem
-rem  Drag a video file or a folder onto this file, or double-click it to pick a
-rem  file with the Windows dialog. Either way the TUI opens with Arabic as the
-rem  language and every configured provider as the engine. Nothing is downloaded
-rem  without you choosing the subtitle: auto_selection stays whatever config.yaml
-rem  says, and this launcher passes no flag that could change it.
+rem  Drag one or more videos, or folders, onto this file, or double-click it to
+rem  pick a file with the Windows dialog. Either way the TUI opens with Arabic as
+rem  the language and every configured provider as the engine. Nothing is
+rem  downloaded without you choosing the subtitle: auto_selection stays whatever
+rem  config.yaml says, and this launcher passes no flag that could change it.
 rem
 rem  Keep this file ASCII-only. cmd.exe reads a batch file's own bytes in the
 rem  console code page, so a non-ASCII literal here -- a comment included -- is
@@ -23,7 +23,11 @@ if "%~1"=="" goto :pick
 
 rem  Branches use goto rather than an if block so that a dropped path
 rem  containing parentheses cannot confuse the block parser.
-"%PYTHON%" "%APP%" "%~1" --lang ar --backend all-providers
+rem
+rem  %* forwards every dropped path in the quoting Explorer gave it, so dropping
+rem  several files searches all of them. Taking "%~1" instead would search only
+rem  the first and silently ignore the rest.
+"%PYTHON%" "%APP%" %* --lang ar --backend all-providers
 goto :finish
 
 :pick

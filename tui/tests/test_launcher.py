@@ -39,17 +39,19 @@ def _launcher_text() -> str:
     return LAUNCHER.read_text(encoding="ascii")
 
 
-def _run_launcher(tmp_path: Path, argument: str) -> tuple[subprocess.CompletedProcess, list[str]]:
+def _run_launcher(tmp_path: Path, *arguments: str) -> tuple[subprocess.CompletedProcess, list[str]]:
     """Run the real launcher through cmd.exe against the stub app.
 
     The batch file locates the app relative to itself, so copying both into a
     temporary directory leaves the argument plumbing under test and nothing else.
+    Each argument is passed as its own argv entry, which is how Explorer hands
+    over a dropped selection.
     """
     (tmp_path / "ARABIC_SUBS.bat").write_bytes(LAUNCHER.read_bytes())
     (tmp_path / "download_subs.py").write_text(STUB_APP, encoding="utf-8")
 
     completed = subprocess.run(
-        [os.environ.get("COMSPEC", "cmd"), "/c", str(tmp_path / "ARABIC_SUBS.bat"), argument],
+        [os.environ.get("COMSPEC", "cmd"), "/c", str(tmp_path / "ARABIC_SUBS.bat"), *arguments],
         cwd=tmp_path,
         capture_output=True,
     )
@@ -72,10 +74,6 @@ def test_launcher_asks_for_arabic_from_every_provider():
     assert text.count("--lang") == text.count("--backend")
     assert "--lang ar" in text
     assert "--backend all-providers" in text
-
-
-def test_launcher_quotes_the_dropped_path():
-    assert '"%~1"' in _launcher_text()
 
 
 def test_picker_offers_every_requested_video_extension():
@@ -126,3 +124,43 @@ def test_path_shapes_are_never_split_into_extra_arguments(tmp_path, name):
     assert len(argv) == 5
     assert Path(argv[0]) == media
     assert argv[1:] == ["--lang", "ar", "--backend", "all-providers"]
+
+
+def test_every_dropped_file_reaches_the_app(tmp_path):
+    # Explorer hands a multi-file drop to the batch file as one argument per
+    # file, so all of them must survive: a launcher that forwards only the first
+    # would search one episode and say nothing about the rest.
+    first = tmp_path / "Episode 01.mkv"
+    second = tmp_path / "Episode 02 (1984) عربي.mkv"
+    first.touch()
+    second.touch()
+
+    completed, argv = _run_launcher(tmp_path, str(first), str(second))
+
+    assert argv == [
+        str(first),
+        str(second),
+        "--lang",
+        "ar",
+        "--backend",
+        "all-providers",
+    ]
+    assert completed.returncode == 0
+
+
+def test_dropped_files_and_folders_can_be_mixed(tmp_path):
+    folder = tmp_path / "Season 01"
+    folder.mkdir()
+    media = tmp_path / "Special عربي.mkv"
+    media.touch()
+
+    _, argv = _run_launcher(tmp_path, str(folder), str(media))
+
+    assert argv == [
+        str(folder),
+        str(media),
+        "--lang",
+        "ar",
+        "--backend",
+        "all-providers",
+    ]

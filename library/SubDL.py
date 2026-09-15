@@ -301,7 +301,7 @@ class SubDL:
         abs_url = self._download_url(rel_url)
         response = requests.get(abs_url, timeout=10)
         response.raise_for_status()
-        ext = f".{fmt}" if fmt in ("srt", "ass", "vtt") else ".srt"
+        ext = f".{fmt}" if fmt in ("srt", "ass", "ssa", "vtt") else ".srt"
         target_filename = self._target_subtitle_name(
             video_input_path, language_choice, ext
         )
@@ -337,13 +337,6 @@ class SubDL:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        if language_choice:
-            subtitle_filename = f"{video_input_path.stem}.{language_choice}.ass"
-            fallback_filename = f"{video_input_path.stem}.{language_choice}.srt"
-        else:
-            subtitle_filename = f"{video_input_path.stem}.ass"
-            fallback_filename = f"{video_input_path.stem}.srt"
-
         if not is_movie and (video_season is None or video_episode is None):
             self.console.print(
                 "[bold red]Error: Could not extract season/episode from "
@@ -357,20 +350,21 @@ class SubDL:
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 extracted_files = zip_ref.namelist()
                 ass_files = [f for f in extracted_files if f.endswith(".ass")]
+                ssa_files = [f for f in extracted_files if f.endswith(".ssa")]
                 srt_files = [f for f in extracted_files if f.endswith(".srt")]
 
-                if not ass_files and not srt_files:
+                if not ass_files and not ssa_files and not srt_files:
                     self.console.print(
-                        "[bold red]Error: No .ass or .srt subtitle files "
+                        "[bold red]Error: No .ass, .ssa, or .srt subtitle files "
                         "found in the archive.[/]"
                     )
                     return None
 
                 if is_movie:
-                    matching_subtitle = (ass_files + srt_files)[0]
+                    matching_subtitle = (ass_files + ssa_files + srt_files)[0]
                 else:
                     matching_subtitle = None
-                    for subtitle_file in ass_files + srt_files:
+                    for subtitle_file in ass_files + ssa_files + srt_files:
                         sub_season, sub_episode = (
                             self.subtitle_utils.extract_season_and_episode(
                                 subtitle_file
@@ -380,16 +374,18 @@ class SubDL:
                             matching_subtitle = subtitle_file
                             break
 
-                for subtitle_file in ass_files + srt_files:
+                for subtitle_file in ass_files + ssa_files + srt_files:
                     try:
                         with zip_ref.open(subtitle_file) as source:
                             decoded_content = self._decode_bytes(source.read())
 
                         if subtitle_file == matching_subtitle:
-                            target_filename = (
-                                subtitle_filename
-                                if subtitle_file.endswith(".ass")
-                                else fallback_filename
+                            # The preferred name keeps the archive member's own
+                            # extension, so an ASS or SSA match is never renamed .srt.
+                            target_filename = self._target_subtitle_name(
+                                video_input_path,
+                                language_choice,
+                                Path(subtitle_file).suffix,
                             )
                             selected_subtitle_path = self._output_path(
                                 video_input_path,

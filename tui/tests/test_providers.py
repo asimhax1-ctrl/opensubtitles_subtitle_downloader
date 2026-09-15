@@ -657,3 +657,127 @@ def test_normalize_subtitle_format_is_total():
     assert normalize_subtitle_format("") is None
     assert normalize_subtitle_format("   ") is None
     assert normalize_subtitle_format("mkv") is None
+
+
+# --- Legacy CLI format preservation ---------------------------------------
+
+class _FakeResponse:
+    def __init__(self, content):
+        self.content = content
+
+    def raise_for_status(self):
+        return None
+
+
+class _SilentConsole:
+    def print(self, *args, **kwargs):
+        return None
+
+
+def test_subdl_single_file_download_keeps_an_ssa_extension(tmp_path, monkeypatch):
+    import library.SubDL as subdl_module
+
+    monkeypatch.setattr(
+        subdl_module.requests,
+        "get",
+        lambda *a, **k: _FakeResponse(b"[Script Info]\n"),
+    )
+    client = object.__new__(subdl_module.SubDL)
+    client.output_directory = None
+    client.console = _SilentConsole()
+
+    written = subdl_module.SubDL._download_single_file(
+        client,
+        "https://x.test/file.zip",
+        "ssa",
+        tmp_path / "Movie.2026.mkv",
+        "ar",
+    )
+
+    assert written is not None
+    assert written.suffix == ".ssa"
+
+
+def test_subdl_zip_scan_recognizes_ssa_members():
+    import inspect
+
+    import library.SubDL as subdl_module
+
+    source = inspect.getsource(subdl_module.SubDL._download_zip)
+
+    assert '".ssa"' in source
+
+
+def test_subdl_zip_extracts_an_ssa_member_as_ssa(tmp_path, monkeypatch):
+    import io
+    import zipfile
+
+    import library.SubDL as subdl_module
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("Movie.2026.ar.ssa", "[Script Info]\n")
+    payload = archive.getvalue()
+
+    class StreamingResponse:
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size=8192):
+            return [payload]
+
+    monkeypatch.setattr(subdl_module.requests, "get", lambda *a, **k: StreamingResponse())
+    client = object.__new__(subdl_module.SubDL)
+    client.output_directory = None
+    client.console = _SilentConsole()
+
+    written = subdl_module.SubDL._download_zip(
+        client,
+        "https://x.test/file.zip",
+        tmp_path / "Movie.2026.mkv",
+        "ar",
+        None,
+        None,
+        True,
+    )
+
+    assert written is not None
+    assert written.name == "Movie.2026.ar.ssa"
+    assert written.read_text(encoding="utf-8") == "[Script Info]\n"
+
+
+def test_subdl_zip_extracts_an_srt_member_as_srt(tmp_path, monkeypatch):
+    import io
+    import zipfile
+
+    import library.SubDL as subdl_module
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("Movie.2026.ar.srt", "1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    payload = archive.getvalue()
+
+    class StreamingResponse:
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size=8192):
+            return [payload]
+
+    monkeypatch.setattr(subdl_module.requests, "get", lambda *a, **k: StreamingResponse())
+    client = object.__new__(subdl_module.SubDL)
+    client.output_directory = None
+    client.console = _SilentConsole()
+
+    written = subdl_module.SubDL._download_zip(
+        client,
+        "https://x.test/file.zip",
+        tmp_path / "Movie.2026.mkv",
+        "ar",
+        None,
+        None,
+        True,
+    )
+
+    assert written is not None
+    assert written.name == "Movie.2026.ar.srt"

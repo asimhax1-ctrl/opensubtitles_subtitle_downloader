@@ -244,6 +244,8 @@ class OpenSubtitles:
                 "[cyan]Searching for subtitles for[/cyan] "
                 f"[yellow]{media_name}[/yellow]"
             )
+            # Legacy OpenSubtitles always writes SRT here; this check must match the
+            # writer below, not the TUI's format-preserving path.
             subtitle_path = self._output_path(
                 path,
                 f"{path.stem}.{language_choice}.srt",

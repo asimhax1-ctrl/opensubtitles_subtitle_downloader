@@ -17,6 +17,7 @@ from tui.domain import (
     Provider,
     ProviderSearchResult,
     SearchRequest,
+    normalize_subtitle_format,
 )
 
 SENSITIVE_QUERY_KEYS = {
@@ -103,6 +104,12 @@ def candidate_from_standardized(
         fingerprint = sha256(identity.encode()).hexdigest()[:16]
         provider_id = f"fingerprint-{fingerprint}"
     url = attributes.get("public_url") or attributes.get("url")
+    raw_format = (
+        attributes.get("sub_format")
+        or attributes.get("format")
+        or attributes.get("file_name")
+        or url
+    )
     return Candidate(
         provider=provider,
         provider_id=provider_id,
@@ -129,6 +136,7 @@ def candidate_from_standardized(
             attributes.get("ai_translated") or attributes.get("machine_translated")
         ),
         author=str(attributes.get("author") or "Unknown"),
+        format=normalize_subtitle_format(raw_format),
     )
 
 

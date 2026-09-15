@@ -45,6 +45,31 @@ class EngineMode(StrEnum):
         return self.provider.label if self.provider else self.value.title()
 
 
+# Subtitle container formats this application recognizes end to end. Anything else
+# is treated as unknown so callers fall back to content sniffing rather than guess.
+SUBTITLE_FORMATS = ("srt", "ass", "ssa", "vtt", "sub")
+
+
+def normalize_subtitle_format(value) -> str | None:
+    """Return a known subtitle format from a format string, URL, or file name.
+
+    Total: anything unrecognized returns ``None`` rather than a default, so a caller
+    can distinguish "known to be SRT" from "unknown, sniff the file".
+    """
+    if not value:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in SUBTITLE_FORMATS:
+        return text
+    leaf = text.rsplit("/", 1)[-1].rsplit("?", 1)[0].rsplit("#", 1)[0]
+    if "." not in leaf:
+        return None
+    extension = leaf.rsplit(".", 1)[-1]
+    return extension if extension in SUBTITLE_FORMATS else None
+
+
 @dataclass(frozen=True)
 class SearchRequest:
     media_path: Path | str
@@ -67,6 +92,8 @@ class Candidate:
     hearing_impaired: bool = False
     ai_translated: bool = False
     author: str = "Unknown"
+    format: str | None = None
+    match_reasons: tuple[str, ...] = ()
     score: float = 0.0
     raw_flags: dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -87,6 +114,8 @@ class Candidate:
             "hearing_impaired": self.hearing_impaired,
             "ai_translated": self.ai_translated,
             "author": self.author,
+            "format": self.format,
+            "match_reasons": list(self.match_reasons),
             "score": self.score,
         }
 

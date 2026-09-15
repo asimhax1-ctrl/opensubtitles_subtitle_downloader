@@ -55,3 +55,31 @@ def test_search_request_keeps_effective_query():
 def test_string_enums_serialize_as_their_values():
     assert str(Provider.SUBDL) == "subdl"
     assert str(EngineMode.AUTO) == "auto"
+
+
+def test_candidate_public_dict_includes_format_and_match_reasons():
+    candidate = Candidate(
+        provider=Provider.SUBDL,
+        provider_id="1",
+        release="R",
+        language="ar",
+        format="ass",
+        match_reasons=("exact hash match",),
+    )
+
+    public = candidate.as_public_dict()
+
+    assert public["format"] == "ass"
+    assert public["match_reasons"] == ["exact hash match"]
+
+
+def test_candidate_defaults_are_format_none_and_no_reasons():
+    candidate = Candidate(
+        provider=Provider.SUBDL,
+        provider_id="1",
+        release="R",
+        language="ar",
+    )
+
+    assert candidate.format is None
+    assert candidate.match_reasons == ()

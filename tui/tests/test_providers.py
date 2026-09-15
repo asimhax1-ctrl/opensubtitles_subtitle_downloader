@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from library.OpenSubtitles import OpenSubtitles
 from library.SubDL import SubDL
 from library.SubSource import SubSource
@@ -11,7 +13,7 @@ from tui.config import (
     GeneralConfig,
     ProviderConfig,
 )
-from tui.domain import Provider, SearchRequest
+from tui.domain import Provider, SearchRequest, normalize_subtitle_format
 from tui.providers.base import candidate_from_standardized
 from tui.providers.factory import create_adapters
 from tui.providers.opensubtitles import OpenSubtitlesAdapter
@@ -620,3 +622,38 @@ def test_mixed_script_stem_produces_one_variant_per_script():
     assert names
     assert any("الهيبة" in name for name in names)
     assert any("Al-Hayba" in name or "Al Hayba" in name for name in names)
+
+
+# --- Format detection at the provider boundary ----------------------------
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        ({"attributes": {"sub_format": "ass"}}, "ass"),
+        ({"attributes": {"format": "SSA"}}, "ssa"),
+        ({"attributes": {"url": "https://x.test/a/b/file.vtt"}}, "vtt"),
+        ({"attributes": {"url": "https://x.test/a/file.SRT?api_key=abc"}}, "srt"),
+        ({"attributes": {"url": "https://x.test/a/file.zip"}}, None),
+        ({"attributes": {}}, None),
+    ],
+)
+def test_candidate_format_is_populated_from_provider_metadata(row, expected):
+    candidate = candidate_from_standardized(Provider.SUBDL, row)
+
+    assert candidate.format == expected
+
+
+def test_candidate_format_prefers_sub_format_over_url():
+    candidate = candidate_from_standardized(
+        Provider.SUBDL,
+        {"attributes": {"sub_format": "ass", "url": "https://x.test/a.srt"}},
+    )
+
+    assert candidate.format == "ass"
+
+
+def test_normalize_subtitle_format_is_total():
+    assert normalize_subtitle_format(None) is None
+    assert normalize_subtitle_format("") is None
+    assert normalize_subtitle_format("   ") is None
+    assert normalize_subtitle_format("mkv") is None

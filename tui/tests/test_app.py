@@ -1,4 +1,6 @@
 import asyncio
+import html
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -7,7 +9,13 @@ import pytest
 from textual.color import Color
 from textual.widgets import Button, ContentSwitcher, DataTable, Input, Static
 
-from tui.app import ConfirmConfigExit, ConfirmConfigSave, ConfirmQuit, SubsApp
+from tui.app import (
+    CandidatePreview,
+    ConfirmConfigExit,
+    ConfirmConfigSave,
+    ConfirmQuit,
+    SubsApp,
+)
 from tui.config import ConfigRepository
 from tui.domain import Candidate, EngineMode, Provider, QueueStatus
 from tui.search import CoordinatedSearchResult
@@ -1507,5 +1515,98 @@ def test_detail_pane_shows_format_and_match_reasons(configured_app):
             assert "ass" in provider_line
             assert "movie/episode match" in detail
             assert "provider: SubDL (reliability 1/3)" in detail
+
+    asyncio.run(run())
+
+
+def _preview_body(preview) -> str:
+    """Rendered text of the candidate preview modal, in document order."""
+    return "\n".join(str(widget.content) for widget in preview.query(Static))
+
+
+def _preview_field(body: str, label: str) -> str:
+    """Value rendered after ``label`` in the preview body, or "" when absent."""
+    for line in body.splitlines():
+        if line.startswith(f"{label} "):
+            return line[len(label) :].strip()
+    return ""
+
+
+PREVIEW_MATCH_REASONS = (
+    "movie/episode match",
+    "year match 1984",
+    "provider: SubDL (reliability 1/3)",
+    "source: BluRay",
+    "resolution: 1080p",
+    "release group match",
+)
+
+
+def _preview_candidate() -> Candidate:
+    return Candidate(
+        provider=Provider.SUBDL,
+        provider_id="arabic-ass",
+        release="Amadeus.1984.1080p.BluRay.x264-GROUP",
+        language="ar",
+        format="ass",
+        # The full reason list, which is what search._compose_reasons caps at, so
+        # the modal is given the tallest body it can ever be asked to render.
+        match_reasons=PREVIEW_MATCH_REASONS,
+        score=55,
+    )
+
+
+def _rendered_rows(svg: str) -> str:
+    """Text that reached the screen, as one searchable string.
+
+    export_screenshot escapes spaces as ``&#160;``, so the rows are decoded
+    before anything is searched for in them.
+    """
+    rows = [
+        html.unescape(re.sub(r"<[^>]+>", "", row))
+        for row in re.findall(r"<text[^>]*>(.*?)</text>", svg, flags=re.DOTALL)
+    ]
+    return "\n".join(rows).replace("\xa0", " ")
+
+
+def test_candidate_preview_shows_format_and_match_reasons(configured_app):
+    # The modal is a second renderer of the same candidate as the detail pane and
+    # was missed when the Fmt column and match reasons landed.
+    app, coordinator = configured_app
+    coordinator.candidates = [_preview_candidate()]
+
+    async def run():
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.3)
+            app.action_preview()
+            await pilot.pause()
+
+            preview = app.screen
+            assert isinstance(preview, CandidatePreview)
+            body = _preview_body(preview)
+
+            assert _preview_field(body, "Format") == "ass"
+            assert _preview_field(body, "Reasons") == " · ".join(PREVIEW_MATCH_REASONS)
+
+    asyncio.run(run())
+
+
+def test_candidate_preview_renders_every_line_it_composes(configured_app):
+    # The tail of the wrapped reason string and the closing line are the first
+    # things a too-short container drops, and export_screenshot is the only view
+    # of what actually reached the screen.
+    app, coordinator = configured_app
+    coordinator.candidates = [_preview_candidate()]
+
+    async def run():
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.3)
+            app.action_preview()
+            await pilot.pause()
+
+            rendered = _rendered_rows(app.export_screenshot())
+
+            assert "release group match" in rendered
+            assert "esc or p to close" in rendered
 
     asyncio.run(run())

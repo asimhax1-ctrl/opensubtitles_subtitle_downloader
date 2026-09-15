@@ -87,6 +87,26 @@ def normalize_language(
     return aliases.get(normalized, normalized)
 
 
+def _archive_member_format(unpack_files: Any) -> str | None:
+    """Return the format of the first recognizable file inside a download archive.
+
+    Providers that hand back an archive list its contents separately (SubDL's
+    ``unpack_files``), one entry per contained file with its own ``format`` and
+    ``url``. The archive's own URL is a ``.zip`` and says nothing about what is
+    inside it, so this is the only place the member format appears.
+    """
+    if not isinstance(unpack_files, list):
+        return None
+    for entry in unpack_files:
+        if not isinstance(entry, Mapping):
+            continue
+        value = entry.get("format") or entry.get("file_name") or entry.get("url")
+        member_format = normalize_subtitle_format(value)
+        if member_format:
+            return member_format
+    return None
+
+
 def candidate_from_standardized(
     provider: Provider,
     row: dict[str, Any],
@@ -104,10 +124,13 @@ def candidate_from_standardized(
         fingerprint = sha256(identity.encode()).hexdigest()[:16]
         provider_id = f"fingerprint-{fingerprint}"
     url = attributes.get("public_url") or attributes.get("url")
+    # An archive member is consulted before the URL because the URL of an archive
+    # is the archive itself: it would answer ".zip" and stop the chain there.
     raw_format = (
         attributes.get("sub_format")
         or attributes.get("format")
         or attributes.get("file_name")
+        or _archive_member_format(attributes.get("unpack_files"))
         or url
     )
     return Candidate(

@@ -221,7 +221,8 @@ class CandidatePreview(ModalScreen[None]):
     CandidatePreview > Vertical {
         width: 72;
         max-width: 92%;
-        height: 19;
+        height: auto;
+        max-height: 80%;
         padding: 1 2;
         background: #111820;
         border: round #75a7ff;
@@ -244,9 +245,11 @@ class CandidatePreview(ModalScreen[None]):
                 f"\n[b]{candidate.release}[/b]\n\n"
                 f"Provider     {candidate.provider.label}\n"
                 f"Language     {candidate.language.upper()}\n"
+                f"Format       {candidate.format or '—'}\n"
                 f"Uploader     {candidate.author}\n"
                 f"Downloads    {candidate.download_count:,}\n"
                 f"Match score  {candidate.score:.0f}\n"
+                f"Reasons      {' · '.join(candidate.match_reasons) or '—'}\n"
                 f"Hash / HI / AI  "
                 f"{'yes' if candidate.hash_match else 'no'} / "
                 f"{'yes' if candidate.hearing_impaired else 'no'} / "

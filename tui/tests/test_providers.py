@@ -652,6 +652,102 @@ def test_candidate_format_prefers_sub_format_over_url():
     assert candidate.format == "ass"
 
 
+@pytest.mark.parametrize("extension", ["srt", "ass", "ssa", "vtt", "sub"])
+def test_candidate_format_is_read_from_unpacked_archive_members(extension):
+    # SubDL answers with an archive at attributes["url"] and lists the subtitle
+    # files inside it under attributes["unpack_files"]. The archive URL is a
+    # ".zip", which normalizes to no format at all, so every SubDL row rendered a
+    # blank Fmt cell until the archive listing was consulted.
+    candidate = candidate_from_standardized(
+        Provider.SUBDL,
+        {
+            "attributes": {
+                "url": "https://dl.subdl.com/subtitle/1234-abcd/Amadeus.1984.zip",
+                "unpack_files": [
+                    {
+                        "url": (
+                            "https://dl.subdl.com/subtitle/1234-abcd/"
+                            f"Amadeus.1984.{extension}"
+                        ),
+                        "format": extension,
+                        "season": None,
+                        "episode": None,
+                    }
+                ],
+            }
+        },
+    )
+
+    assert candidate.format == extension
+
+
+def test_candidate_format_uses_an_archive_member_extension_without_a_format_key():
+    candidate = candidate_from_standardized(
+        Provider.SUBDL,
+        {
+            "attributes": {
+                "url": "https://dl.subdl.com/subtitle/1234-abcd/Amadeus.1984.zip",
+                "unpack_files": [
+                    {"url": "https://dl.subdl.com/subtitle/1234-abcd/bundle.ass"}
+                ],
+            }
+        },
+    )
+
+    assert candidate.format == "ass"
+
+
+def test_candidate_format_prefers_provider_metadata_over_archive_members():
+    # An explicit format the provider states about the result itself outranks the
+    # listing of what happens to be inside its archive.
+    candidate = candidate_from_standardized(
+        Provider.SUBDL,
+        {
+            "attributes": {
+                "sub_format": "ass",
+                "url": "https://x.test/a/bundle.zip",
+                "unpack_files": [{"url": "https://x.test/a.srt", "format": "srt"}],
+            }
+        },
+    )
+
+    assert candidate.format == "ass"
+
+
+def test_candidate_format_ignores_archive_members_it_cannot_recognize():
+    candidate = candidate_from_standardized(
+        Provider.SUBDL,
+        {
+            "attributes": {
+                "url": "https://x.test/a/bundle.zip",
+                "unpack_files": [{"url": "https://x.test/a.mkv", "format": "mkv"}],
+            }
+        },
+    )
+
+    assert candidate.format is None
+
+
+@pytest.mark.parametrize(
+    "unpack_files",
+    [None, "srt", 7, [None], [{}], [{"url": ""}]],
+)
+def test_candidate_format_survives_unusable_archive_listings(unpack_files):
+    # unpack_files is provider-supplied, so an unexpected shape must degrade to
+    # "no format" rather than take the whole provider search down with it.
+    candidate = candidate_from_standardized(
+        Provider.SUBDL,
+        {
+            "attributes": {
+                "url": "https://x.test/a/bundle.zip",
+                "unpack_files": unpack_files,
+            }
+        },
+    )
+
+    assert candidate.format is None
+
+
 def test_normalize_subtitle_format_is_total():
     assert normalize_subtitle_format(None) is None
     assert normalize_subtitle_format("") is None

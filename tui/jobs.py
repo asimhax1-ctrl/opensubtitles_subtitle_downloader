@@ -15,8 +15,35 @@ from tui.domain import (
     DownloadResult,
     PostProcessResult,
     Provider,
+    SUBTITLE_FORMATS,
+    normalize_subtitle_format,
 )
 from tui.providers.base import ProviderAdapter
+
+# SSA-specific marker first: SSA files also carry "[Script Info]", so testing the
+# ASS markers first would misclassify every SSA file as ASS.
+SNIFF_SSA_MARKER = "[V4 Styles]"
+SNIFF_ASS_MARKERS = ("[V4+ Styles]", "[Script Info]")
+SNIFF_READ_BYTES = 4096
+DEFAULT_SUBTITLE_FORMAT = "srt"
+
+
+def sniff_subtitle_format(path: Path) -> str:
+    """Infer a subtitle format from file content, defaulting to ``srt``.
+
+    Only ever called inside the download staging directory, so an ambiguous result
+    cannot leave a misnamed file beside the media.
+    """
+    try:
+        with path.open("r", encoding="utf-8-sig", errors="replace") as stream:
+            head = stream.read(SNIFF_READ_BYTES)
+    except OSError:
+        return DEFAULT_SUBTITLE_FORMAT
+    if SNIFF_SSA_MARKER in head:
+        return "ssa"
+    if any(marker in head for marker in SNIFF_ASS_MARKERS):
+        return "ass"
+    return DEFAULT_SUBTITLE_FORMAT
 
 
 class SubtitleCleaner:
@@ -92,13 +119,22 @@ class JobCoordinator:
                     error=f"Could not create subtitle output directory: {exc}",
                 )
 
-        expected_target = destination / f"{media.stem}.{candidate.language}.srt"
-        if expected_target.exists() and not overwrite:
-            return DownloadResult(
-                provider=candidate.provider,
-                media_path=media,
-                conflict_path=expected_target,
-            )
+        language_suffix = f".{candidate.language}" if candidate.language else ""
+        if candidate.format:
+            expected_names = [f"{media.stem}{language_suffix}.{candidate.format}"]
+        else:
+            expected_names = [
+                f"{media.stem}{language_suffix}.{extension}"
+                for extension in SUBTITLE_FORMATS
+            ]
+        for expected_name in expected_names:
+            expected_target = destination / expected_name
+            if expected_target.exists() and not overwrite:
+                return DownloadResult(
+                    provider=candidate.provider,
+                    media_path=media,
+                    conflict_path=expected_target,
+                )
 
         try:
             return self._stage_download(
@@ -143,6 +179,16 @@ class JobCoordinator:
                     media_path=media,
                     error="Provider wrote outside the download staging directory",
                 )
+
+            detected = normalize_subtitle_format(candidate.format) or sniff_subtitle_format(
+                staged_path
+            )
+            language_suffix = f".{candidate.language}" if candidate.language else ""
+            desired_name = f"{media.stem}{language_suffix}.{detected}"
+            if staged_path.name != desired_name:
+                renamed = staged_path.with_name(desired_name)
+                os.replace(staged_path, renamed)
+                staged_path = renamed
 
             target = destination / staged_path.name
             if target.exists() and not overwrite:

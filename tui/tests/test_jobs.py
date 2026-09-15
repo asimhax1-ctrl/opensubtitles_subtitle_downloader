@@ -1,5 +1,7 @@
+import pytest
+
 from tui.domain import Candidate, DownloadResult, Provider
-from tui.jobs import JobCoordinator
+from tui.jobs import JobCoordinator, sniff_subtitle_format
 
 
 def candidate_for(provider, provider_id="77"):
@@ -22,6 +24,9 @@ def encoded_download(tmp_path, text, encoding):
 
 
 class RecordingAdapter:
+    body = "new"
+    extension = "srt"
+
     def __init__(self, provider):
         self.provider = provider
         self.downloads = []
@@ -30,8 +35,8 @@ class RecordingAdapter:
     def download(self, candidate, media_path):
         self.downloads.append(candidate.key)
         self.media_paths.append(media_path)
-        target = media_path.with_name(f"{media_path.stem}.en.srt")
-        target.write_text("new", encoding="utf-8")
+        target = media_path.with_name(f"{media_path.stem}.en.{self.extension}")
+        target.write_text(self.body, encoding="utf-8")
         return DownloadResult(
             provider=self.provider,
             media_path=media_path,
@@ -272,3 +277,76 @@ def test_postprocess_forwards_live_sync_output(tmp_path):
 
     assert result.synced is True
     assert output == ["extracting speech segments...", "...done"]
+
+
+# --- Format sniffing ------------------------------------------------------
+
+ASS_BODY = "[Script Info]\nScriptType: v4.00+\n[V4+ Styles]\nFormat: Name\n"
+SSA_BODY = "[Script Info]\nScriptType: v4.00\n[V4 Styles]\nFormat: Name\n"
+SRT_BODY = "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+
+
+def format_candidate(subtitle_format=None, language="en"):
+    return Candidate(
+        provider=Provider.SUBDL,
+        provider_id="77",
+        release="Movie",
+        language=language,
+        format=subtitle_format,
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [(ASS_BODY, "ass"), (SSA_BODY, "ssa"), (SRT_BODY, "srt"), ("", "srt")],
+)
+def test_sniff_subtitle_format_maps_content_to_extension(tmp_path, body, expected):
+    path = tmp_path / "subtitle.bin"
+    path.write_text(body, encoding="utf-8")
+
+    assert sniff_subtitle_format(path) == expected
+
+
+def test_an_ssa_body_wins_over_the_shared_script_info_marker(tmp_path):
+    # SSA files also carry [Script Info]; the SSA-specific marker must be tested first.
+    path = tmp_path / "subtitle.bin"
+    path.write_text(SSA_BODY, encoding="utf-8")
+
+    assert sniff_subtitle_format(path) == "ssa"
+
+
+def test_known_candidate_format_is_honoured_without_sniffing(tmp_path):
+    # The body is SRT, so a sniff would say "srt". Trusting the provider's "ass"
+    # over the content is what proves no sniffing happened.
+    adapter = RecordingAdapter(Provider.SUBDL)
+    adapter.body = SRT_BODY
+    jobs = JobCoordinator({Provider.SUBDL: adapter})
+
+    result = jobs.download(format_candidate("ass"), tmp_path / "Movie.mkv")
+
+    assert result.subtitle_path.suffix == ".ass"
+
+
+def test_unknown_format_falls_back_to_content_sniffing(tmp_path):
+    adapter = RecordingAdapter(Provider.SUBDL)
+    adapter.body = SSA_BODY
+    jobs = JobCoordinator({Provider.SUBDL: adapter})
+
+    result = jobs.download(format_candidate(None), tmp_path / "Movie.mkv")
+
+    assert result.subtitle_path.suffix == ".ssa"
+
+
+def test_existing_ass_subtitle_is_detected_as_a_conflict(tmp_path):
+    adapter = RecordingAdapter(Provider.SUBDL)
+    jobs = JobCoordinator({Provider.SUBDL: adapter})
+    media = tmp_path / "Movie.mkv"
+    media.touch()
+    existing = tmp_path / "Movie.ar.ass"
+    existing.write_text(ASS_BODY, encoding="utf-8")
+
+    result = jobs.download(format_candidate(None, language="ar"), media)
+
+    assert result.conflict_path == existing
+    assert existing.read_text(encoding="utf-8") == ASS_BODY
+    assert adapter.downloads == []

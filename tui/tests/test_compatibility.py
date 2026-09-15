@@ -63,6 +63,27 @@ def test_episode_and_season_are_read_from_the_release_name():
     assert facets.episode == 3
 
 
+def test_a_season_pack_states_a_season_and_no_episode():
+    # A season pack is a complete name, not a silent one. Read as having neither
+    # a season nor an episode it would be indistinguishable from a film, which
+    # changes both its own denominator and whether an episode subtitle conflicts.
+    facets = parse_release_facets("The.Pitt.S01.1080p.WEB-DL.x264-GROUP")
+
+    assert facets.season == 1
+    assert facets.episode is None
+    # "s01" is the season, so it is not part of the title.
+    assert facets.title == "the pitt"
+
+
+def test_a_title_that_merely_contains_a_digit_is_left_alone():
+    # The guard on reading a bare season: only a whole "s<digits>" word counts, so
+    # a title is not shortened by a stray match inside it.
+    facets = parse_release_facets("S1m0ne.2002.1080p.BluRay.x264-GROUP")
+
+    assert facets.season is None
+    assert "s1m0ne" in facets.title
+
+
 def test_a_release_states_no_edition_until_it_states_one():
     # The whole point of the feature: Amadeus (1984).mkv does not say whether it
     # is the theatrical cut, so nothing may claim it is.
@@ -143,6 +164,75 @@ def test_the_right_episode_in_the_wrong_season_is_a_mismatch():
     assert wrong.badge == "MISMATCH"
     assert "media: S01" in wrong.conflicts
     assert "subtitle: S02" in wrong.conflicts
+
+
+def test_a_film_does_not_match_a_subtitle_that_claims_an_episode():
+    # The bug this closes: a media file with no season or episode is a film, so a
+    # subtitle declaring S01E03 is for something else entirely. Treating the
+    # film's silence as "unknown" let it score identically to the real release.
+    exact = compatibility("Amadeus.1984.1080p.BluRay.x264-GROUP", MOVIE_MEDIA)
+    claims_an_episode = compatibility(
+        "Amadeus.1984.S01E03.1080p.BluRay.x264-GROUP", MOVIE_MEDIA
+    )
+
+    assert claims_an_episode.badge == "MISMATCH"
+    assert claims_an_episode.percent < exact.percent
+    assert claims_an_episode.percent <= 34
+    assert "media: film" in claims_an_episode.conflicts
+    assert "subtitle: S01E03" in claims_an_episode.conflicts
+    # A conflict replaces the evidence block: a reader must not see the pluses
+    # next to a subtitle that is for the wrong thing.
+    assert claims_an_episode.evidence_lines()[0] == "Conflict:"
+
+
+@pytest.mark.parametrize(
+    "release, expected",
+    [
+        ("Amadeus.1984.S01E03.1080p.BluRay.x264-GROUP", "S01E03"),
+        ("Amadeus.1984.S01.1080p.BluRay.x264-GROUP", "S01"),
+        ("Amadeus.1984.E03.1080p.BluRay.x264-GROUP", "E03"),
+    ],
+)
+def test_every_way_a_film_subtitle_can_claim_an_episode_conflicts(release, expected):
+    # A season pack, a lone episode and a full SxxExx all say the subtitle is for
+    # an episode, and a film has none of them.
+    match = compatibility(release, MOVIE_MEDIA)
+
+    assert match.badge == "MISMATCH"
+    assert f"subtitle: {expected}" in match.conflicts
+
+
+def test_a_film_subtitle_that_claims_nothing_keeps_its_score():
+    # The guard on the rule above: only a *claim* conflicts, so a film subtitle
+    # that stays silent about season and episode is scored exactly as before.
+    silent = compatibility("Amadeus.1984.1080p.BluRay.x264-GROUP", MOVIE_MEDIA)
+
+    assert silent.conflicts == ()
+    assert silent.badge == "BEST"
+
+
+def test_an_episode_inside_a_season_pack_is_not_a_conflict():
+    # A season pack's media name states a season but no episode, so an episode
+    # subtitle for it is compatible -- the pack contains that episode. Only the
+    # film case, which has neither, is a conflict.
+    season_pack = "The.Pitt.S01.1080p.WEB-DL.x264-GROUP"
+    episode = compatibility("The.Pitt.S01E03.1080p.WEB-DL.x264-GROUP", season_pack)
+
+    assert episode.conflicts == ()
+    assert episode.badge != "MISMATCH"
+
+
+def test_a_film_conflict_never_outranks_the_exact_release():
+    # The user-facing consequence: the row for the real movie release has to sit
+    # above a row whose subtitle is for some television episode.
+    results = {
+        "exact": compatibility("Amadeus.1984.1080p.BluRay.x264-GROUP", MOVIE_MEDIA),
+        "episode": compatibility(
+            "Amadeus.1984.S01E03.1080p.BluRay.x264-GROUP", MOVIE_MEDIA
+        ),
+    }
+
+    assert results["exact"].percent > results["episode"].percent
 
 
 def test_a_matching_edition_outranks_a_directors_cut_mismatch():

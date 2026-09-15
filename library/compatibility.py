@@ -12,6 +12,10 @@ points that title and year are worth, never a hundred -- otherwise a sparse
 match would read as a perfect one. Only facets that cannot exist for the media
 are left out of the denominator: a film has no episode to match.
 
+That same reading decides the one place silence is not merely silence. A name
+with no season and no episode is a film, so a subtitle that declares one is for
+something else and is conflicted rather than left unverified.
+
 Deliberately not inputs: download count, hearing-impaired and AI-translated
 flags (signals about availability, not about fit) and provider reliability (a
 tiebreak, which must never inflate a compatibility percentage).
@@ -76,6 +80,14 @@ TITLE_CONFLICT_CAP = 20
 SEASON_CONFLICT_CAP = 25
 EPISODE_CONFLICT_CAP = 25
 EDITION_CONFLICT_CAP = 34
+# A film's name has no season and no episode, so a subtitle declaring one is for
+# a different thing entirely -- the same class of mistake as a wrong episode, and
+# capped the same way. It is a conflict rather than a silence because the media's
+# name already answered the question: it said film.
+FILM_EPISODE_CONFLICT_CAP = 25
+# How the media side of that conflict reads in the Conflict block. There is no
+# value to quote, because the media's identity *is* the absence of a season.
+FILM_IDENTITY_LABEL = "film"
 
 # A conflict in a technical facet costs the facet's own points and this much
 # again, so agreeing is always worth strictly more than staying silent.
@@ -167,6 +179,10 @@ SEASON_EPISODE_RE = re.compile(
     r"^(?:s\d{1,2}e\d{1,3}|\d{1,2}x\d{1,3})$",
     re.IGNORECASE,
 )
+# A season pack states a season and no episode ("Show.S01.1080p"), which is a
+# complete name for a set of episodes and not a film. Matched as a whole word so
+# a title that merely contains the letters "s" and a digit is left alone.
+SEASON_TOKEN_RE = re.compile(r"^s(\d{1,2})$", re.IGNORECASE)
 MEDIA_EXTENSION_RE = re.compile(
     r"\.(?:mkv|mp4|avi|mov|m4v|ts|webm|srt|ass|ssa|vtt|sub|zip)$",
     re.IGNORECASE,
@@ -431,7 +447,10 @@ def compatibility(
     conflicts: list[str] = []
     caps: list[int] = []
 
-    for outcome in (_compare_title(media, subtitle),) + tuple(
+    for outcome in (
+        _compare_title(media, subtitle),
+        _compare_identity_kind(media, subtitle),
+    ) + tuple(
         _compare_facet(rule, getattr(media, rule.name), getattr(subtitle, rule.name))
         for rule in FACET_RULES
     ):
@@ -522,6 +541,43 @@ def _compare_title(media: ReleaseFacets, subtitle: ReleaseFacets) -> _Outcome:
     )
 
 
+def _compare_identity_kind(media: ReleaseFacets, subtitle: ReleaseFacets) -> _Outcome:
+    """Whether the subtitle is for the same *kind* of thing as the media.
+
+    A film's name states no season and no episode, and that absence is what makes
+    it a film -- the same reading ``_ideal_points`` uses for the denominator. So a
+    subtitle that declares one is for a different thing, and is reported as a
+    conflict: the media did not fail to say, it said film.
+
+    The rule is deliberately one-sided. A media name that states a season but no
+    episode is a season pack, which *contains* every episode in it, so an episode
+    subtitle is compatible and stays unverified rather than conflicting.
+    """
+    if media.season is not None or media.episode is not None:
+        return _Outcome(0.0)
+    claimed = _identity_label(subtitle)
+    if claimed is None:
+        return _Outcome(0.0)
+    return _Outcome(
+        0.0,
+        Signal("episode identity conflict", False),
+        (f"media: {FILM_IDENTITY_LABEL}", f"subtitle: {claimed}"),
+        FILM_EPISODE_CONFLICT_CAP,
+    )
+
+
+def _identity_label(facets: ReleaseFacets) -> str | None:
+    """The episode identity a name declares, as ``S01E03``, ``S01`` or ``E03``.
+
+    One label for both facets, because the conflict is about the identity as a
+    whole; pairing the media with "S01" and then again with "E03" would report
+    one mistake twice.
+    """
+    season = f"S{facets.season:02d}" if facets.season is not None else ""
+    episode = f"E{facets.episode:02d}" if facets.episode is not None else ""
+    return f"{season}{episode}" or None
+
+
 def _compare_facet(
     rule: _FacetRule,
     media_value: object,
@@ -593,7 +649,9 @@ def _title_words(
     return [
         word
         for word in words
-        if word not in consumed and not SEASON_EPISODE_RE.match(word)
+        if word not in consumed
+        and not SEASON_EPISODE_RE.match(word)
+        and not SEASON_TOKEN_RE.match(word)
     ]
 
 
@@ -614,12 +672,19 @@ def _episode_of(text: str) -> tuple[int | None, int | None]:
     """Season and episode as the project's own reader finds them.
 
     Delegated so that the two features cannot disagree about which part of a name
-    is the episode number.
+    is the episode number. The project's reader reports no episode evidence at all
+    for a name that states a season without one, though, and a season pack is a
+    complete name rather than an absent one -- so it is read here as the season it
+    states. Left unread, a season pack would be indistinguishable from a film.
     """
     season, episode, confidence = SubtitleUtils._episode_evidence(str(text or ""))
-    if confidence == "none":
-        return None, None
-    return season, episode
+    if confidence != "none":
+        return season, episode
+    for word in _words(text):
+        match = SEASON_TOKEN_RE.match(word)
+        if match:
+            return int(match.group(1)), None
+    return None, None
 
 
 def _edition_of(words: list[str]) -> str | None:

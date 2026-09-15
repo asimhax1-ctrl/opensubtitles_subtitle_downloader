@@ -53,6 +53,8 @@ class CoordinatedSearchResult:
     errors: dict[Provider, str] = field(default_factory=dict)
     attempted: list[Provider] = field(default_factory=list)
     selected_provider: Provider | None = None
+    used_fallback: bool = False
+    fallback_language: str | None = None
 
 
 class SearchCoordinator:
@@ -167,6 +169,54 @@ class SearchCoordinator:
                     selected_provider=provider,
                 )
         return CoordinatedSearchResult(errors=errors, attempted=attempted)
+
+    def search_with_fallback(
+        self,
+        request: SearchRequest,
+        run_search: Any,
+        fallback_language: str = "",
+        auto_download: bool = False,
+    ) -> CoordinatedSearchResult:
+        """Search the target language, then the fallback language if nothing was found.
+
+        ``run_search`` is the caller's own mode entry point (``all_providers`` or
+        ``auto``), so no mode dispatch is duplicated here.
+
+        Arabic results are never replaced by fallback results: the fallback only runs
+        when the target language produced nothing at all, and its result is marked.
+        ``auto_download`` is advisory to the caller -- this method never downloads.
+        """
+        del auto_download  # Download policy belongs to the caller, not the coordinator.
+        primary = run_search(request)
+        if primary.candidates:
+            return primary
+
+        fallback = (fallback_language or "").strip().lower()
+        target = (request.language or "").strip().lower()
+        if not fallback or fallback == target:
+            return primary
+
+        fallback_request = SearchRequest(
+            media_path=request.media_path,
+            query=request.query,
+            language=fallback,
+            hearing_impaired=request.hearing_impaired,
+            show_ai_translated=request.show_ai_translated,
+        )
+        try:
+            result = run_search(fallback_request)
+        except Exception:
+            # A fallback failure must not discard the primary result. The primary
+            # (empty) result stands, and the fallback error reaches the user through
+            # the caller's own notification channel. A synthetic errors key is not
+            # used because errors is keyed by Provider and a language code is not one.
+            primary.used_fallback = False
+            primary.fallback_language = fallback
+            return primary
+
+        result.used_fallback = True
+        result.fallback_language = fallback
+        return result
 
     @staticmethod
     def _safe_search(

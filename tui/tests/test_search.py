@@ -1,5 +1,7 @@
 import threading
 
+import pytest
+
 from tui.domain import (
     Candidate,
     HealthResult,
@@ -321,3 +323,137 @@ def test_search_module_and_library_agree_on_the_reason_cap():
     from library.subtitle_utils import MAX_MATCH_REASONS as library_cap
 
     assert MAX_MATCH_REASONS == library_cap
+
+
+# --- English fallback -----------------------------------------------------
+
+
+class LanguageAwareAdapter(FakeAdapter):
+    """Returns only the candidates whose language the request actually asked for.
+
+    FakeAdapter answers every request with the same list, so it cannot distinguish a
+    primary search from a fallback search. These tests are about that distinction.
+    """
+
+    def search(self, request):
+        self.calls += 1
+        language = (request.language or "").strip().lower()
+        return ProviderSearchResult(
+            provider=self.provider,
+            candidates=[
+                item
+                for item in self.candidates
+                if (item.language or "").strip().lower() == language
+            ],
+            error=self.error,
+        )
+
+
+def test_fallback_does_not_run_when_the_target_language_returns_candidates():
+    adapters = {
+        Provider.SUBDL: FakeAdapter(
+            Provider.SUBDL,
+            [_candidate(Provider.SUBDL, "1", "ar")],
+        )
+    }
+    coordinator = SearchCoordinator(adapters, scorer=FixedScorer())
+
+    result = coordinator.search_with_fallback(
+        _request("ar"),
+        coordinator.all_providers,
+        fallback_language="en",
+    )
+
+    assert result.used_fallback is False
+    assert adapters[Provider.SUBDL].calls == 1
+
+
+def test_fallback_runs_and_is_marked_when_the_target_language_is_empty():
+    adapters = {
+        Provider.SUBDL: LanguageAwareAdapter(Provider.SUBDL),
+        Provider.OPENSUBTITLES: LanguageAwareAdapter(
+            Provider.OPENSUBTITLES,
+            [_candidate(Provider.OPENSUBTITLES, "en", "en")],
+        ),
+    }
+    coordinator = SearchCoordinator(adapters, scorer=FixedScorer())
+
+    result = coordinator.search_with_fallback(
+        _request("ar"),
+        coordinator.all_providers,
+        fallback_language="en",
+    )
+
+    assert result.used_fallback is True
+    assert result.fallback_language == "en"
+    assert [item.language for item in result.candidates] == ["en"]
+
+
+def test_fallback_does_not_run_when_it_equals_the_target_language():
+    adapters = {Provider.SUBDL: FakeAdapter(Provider.SUBDL)}
+    coordinator = SearchCoordinator(adapters, scorer=FixedScorer())
+
+    result = coordinator.search_with_fallback(
+        _request("ar"),
+        coordinator.all_providers,
+        fallback_language="ar",
+    )
+
+    assert result.used_fallback is False
+    assert adapters[Provider.SUBDL].calls == 1
+
+
+@pytest.mark.parametrize("fallback_language", ["", "   "])
+def test_fallback_does_not_run_when_disabled(fallback_language):
+    adapters = {Provider.SUBDL: FakeAdapter(Provider.SUBDL)}
+    coordinator = SearchCoordinator(adapters, scorer=FixedScorer())
+
+    result = coordinator.search_with_fallback(
+        _request("ar"),
+        coordinator.all_providers,
+        fallback_language=fallback_language,
+    )
+
+    assert result.used_fallback is False
+    assert adapters[Provider.SUBDL].calls == 1
+
+
+def test_a_fallback_search_error_leaves_the_primary_result_intact():
+    adapters = {Provider.SUBDL: FakeAdapter(Provider.SUBDL, error="target down")}
+    coordinator = SearchCoordinator(adapters, scorer=FixedScorer())
+
+    def fail_on_the_fallback(request):
+        if (request.language or "").strip().lower() != "ar":
+            raise RuntimeError("fallback exploded")
+        return coordinator.all_providers(request)
+
+    result = coordinator.search_with_fallback(
+        _request("ar"),
+        fail_on_the_fallback,
+        fallback_language="en",
+    )
+
+    assert result.candidates == []
+    assert result.errors[Provider.SUBDL] == "target down"
+    assert result.used_fallback is False
+
+
+def test_fallback_uses_the_injected_mode_entry_point():
+    adapters = {
+        Provider.SUBSOURCE: LanguageAwareAdapter(
+            Provider.SUBSOURCE,
+            [_candidate(Provider.SUBSOURCE, "en", "en")],
+        )
+    }
+    coordinator = SearchCoordinator(adapters, scorer=FixedScorer())
+
+    result = coordinator.search_with_fallback(
+        _request("ar"),
+        coordinator.auto,
+        fallback_language="en",
+    )
+
+    # selected_provider is only ever set by auto(), so a marked fallback result that
+    # carries it can only have come from the injected entry point.
+    assert result.used_fallback is True
+    assert result.selected_provider is Provider.SUBSOURCE

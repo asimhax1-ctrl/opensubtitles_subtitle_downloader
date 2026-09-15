@@ -24,11 +24,13 @@ class FakeAdapter:
 
 
 class FakeAllProvidersCoordinator:
-    def __init__(self, results):
+    def __init__(self, results, fallback_results=None):
         self.results = list(results)
+        self.fallback_results = list(fallback_results or [])
         self.requests = []
         self.concrete_requests = []
         self.auto_requests = []
+        self.fallback_calls = []
 
     def all_providers(self, request):
         self.requests.append(request)
@@ -44,6 +46,30 @@ class FakeAllProvidersCoordinator:
     def auto(self, request):
         self.auto_requests.append(request)
         return self.all_providers(request)
+
+    def search_with_fallback(
+        self,
+        request,
+        run_search,
+        fallback_language="",
+        auto_download=False,
+    ):
+        """Run the injected mode entry point, then substitute a queued fallback result.
+
+        The two-language orchestration belongs to and is tested against
+        SearchCoordinator.search_with_fallback. This fake only has to hand the runner
+        a marked fallback result so the runner's own branching can be asserted.
+        """
+        self.fallback_calls.append(
+            (request.language, fallback_language, auto_download)
+        )
+        primary = run_search(request)
+        if not self.fallback_results:
+            return primary
+        fallback_result = self.fallback_results.pop(0)
+        fallback_result.used_fallback = True
+        fallback_result.fallback_language = fallback_language
+        return fallback_result
 
 
 class FakeJobs:
@@ -92,12 +118,12 @@ def application_config():
     )
 
 
-def candidate(provider_id="best", score=99):
+def candidate(provider_id="best", score=99, language="ar"):
     return Candidate(
         provider=Provider.OPENSUBTITLES,
         provider_id=provider_id,
         release=provider_id,
-        language="ar",
+        language=language,
         score=score,
     )
 
@@ -403,3 +429,72 @@ def test_empty_adapters_returns_zero_attempt_summary(application_config):
     assert summary == HeadlessBatchSummary(attempted=0, succeeded=0, failed=0)
     assert summary.exit_code == 1
     assert any("configured provider" in message.lower() for message in emitted)
+
+
+# --- Fallback behaviour with no human present ------------------------------
+
+
+def test_headless_reports_fallback_candidates_without_downloading(
+    tmp_path,
+    application_config,
+):
+    media = tmp_path / "movie.mkv"
+    media.touch()
+    application_config.general.fallback_language = "en"
+    application_config.general.auto_fallback_download = False
+    emitted = []
+    jobs = FakeJobs()
+    english = candidate(provider_id="english", language="en")
+    coordinator = FakeAllProvidersCoordinator(
+        [result()],
+        fallback_results=[result(english)],
+    )
+    runner = HeadlessAllProvidersRunner(
+        application_config,
+        adapters={Provider.OPENSUBTITLES: FakeAdapter()},
+        coordinator=coordinator,
+        jobs=jobs,
+        emit=emitted.append,
+    )
+
+    summary = runner.run([media], "ar")
+
+    assert coordinator.fallback_calls == [("ar", "en", False)]
+    assert summary.succeeded == 0
+    assert jobs.downloaded == []
+    assert any(
+        "general.auto_fallback_download" in message for message in emitted
+    )
+
+
+def test_headless_downloads_the_best_fallback_candidate_when_opted_in(
+    tmp_path,
+    application_config,
+):
+    media = tmp_path / "movie.mkv"
+    media.touch()
+    application_config.general.fallback_language = "en"
+    application_config.general.auto_fallback_download = True
+    emitted = []
+    jobs = FakeJobs()
+    english = candidate(provider_id="english", language="en")
+    coordinator = FakeAllProvidersCoordinator(
+        [result()],
+        fallback_results=[result(english)],
+    )
+    runner = HeadlessAllProvidersRunner(
+        application_config,
+        adapters={Provider.OPENSUBTITLES: FakeAdapter()},
+        coordinator=coordinator,
+        jobs=jobs,
+        emit=emitted.append,
+    )
+
+    summary = runner.run([media], "ar")
+
+    assert coordinator.fallback_calls == [("ar", "en", True)]
+    assert summary.succeeded == 1
+    assert jobs.downloaded == [(english, media)]
+    assert not any(
+        "general.auto_fallback_download" in message for message in emitted
+    )

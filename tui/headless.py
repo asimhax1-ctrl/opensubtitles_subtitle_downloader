@@ -12,6 +12,10 @@ from tui.jobs import JobCoordinator
 from tui.providers.base import ProviderAdapter
 from tui.search import SearchCoordinator
 
+# The configuration key that turns automatic fallback download on. Defined once so the
+# emitted guidance and the configuration surface cannot drift apart.
+FALLBACK_NOTICE = "auto_fallback_download"
+
 
 @dataclass(frozen=True)
 class HeadlessBatchSummary:
@@ -76,20 +80,35 @@ class HeadlessAllProvidersRunner:
                     hearing_impaired=self.config.general.hearing_impaired,
                     show_ai_translated=self.config.general.show_ai_translated,
                 )
-                if engine_mode is EngineMode.AUTO:
-                    result = self.coordinator.auto(request)
-                elif engine_mode.provider is not None:
-                    result = self.coordinator.concrete(
-                        engine_mode.provider,
-                        request,
-                    )
-                else:
-                    result = self.coordinator.all_providers(request)
+                def run_search(search_request, _mode=engine_mode):
+                    if _mode is EngineMode.AUTO:
+                        return self.coordinator.auto(search_request)
+                    if _mode.provider is not None:
+                        return self.coordinator.concrete(_mode.provider, search_request)
+                    return self.coordinator.all_providers(search_request)
+
+                result = self.coordinator.search_with_fallback(
+                    request,
+                    run_search,
+                    fallback_language=self.config.general.fallback_language,
+                    auto_download=self.config.general.auto_fallback_download,
+                )
                 for provider, error in result.errors.items():
                     self.emit(f"Warning: {provider.label}: {error}")
 
                 if not result.candidates:
                     self.emit(f"Error: No subtitles found for {media}.")
+                    continue
+                if result.used_fallback and not self.config.general.auto_fallback_download:
+                    # No human is present to choose, and silently downloading a
+                    # language the user did not ask for is worse than downloading
+                    # nothing.
+                    self.emit(
+                        f"Notice: No {request.language} subtitles found for {media}. "
+                        f"{len(result.candidates)} {result.fallback_language} "
+                        f"candidate(s) available; set "
+                        f"general.{FALLBACK_NOTICE} to download automatically."
+                    )
                     continue
 
                 download = self.jobs.download(result.candidates[0], media)

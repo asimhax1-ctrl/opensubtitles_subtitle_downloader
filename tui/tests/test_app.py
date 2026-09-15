@@ -23,6 +23,7 @@ class FakeCoordinator:
         self.requests = []
         self.auto_requests = []
         self.all_providers_requests = []
+        self.fallback_calls = []
 
     def concrete(self, provider, request):
         self.requests.append(request)
@@ -41,6 +42,23 @@ class FakeCoordinator:
         self.requests.append(request)
         self.all_providers_requests.append(request)
         return CoordinatedSearchResult(candidates=list(self.candidates))
+
+    def search_with_fallback(
+        self,
+        request,
+        run_search,
+        fallback_language="",
+        auto_download=False,
+    ):
+        """Run the injected mode entry point, then hand back whatever it returned.
+
+        The two-language orchestration belongs to and is tested against
+        SearchCoordinator.search_with_fallback.
+        """
+        self.fallback_calls.append(
+            (request.language, fallback_language, auto_download)
+        )
+        return run_search(request)
 
 
 def test_recursive_startup_adds_nested_media_to_queue(tmp_path):
@@ -285,7 +303,14 @@ def test_all_providers_toggle_restores_previous_mode_and_falls_back_to_auto():
             app.action_toggle_all_providers()
             assert app.state.engine_mode is EngineMode.SUBDL
 
-        fallback_app = SubsApp(config={}, media_paths=[], overrides={})
+        # ASK is stated explicitly rather than left to the configured default: it is
+        # the mode the toggle refuses to restore, so the app must start there for the
+        # AUTO fallback below to be reached.
+        fallback_app = SubsApp(
+            config={"general": {"preferred_backend": "ask"}},
+            media_paths=[],
+            overrides={},
+        )
         async with fallback_app.run_test():
             fallback_app.action_toggle_all_providers()
             assert fallback_app.state.engine_mode is EngineMode.ALL_PROVIDERS
@@ -1321,5 +1346,72 @@ def test_failed_config_write_keeps_live_state_and_dirty_draft(
             assert app.application_config.general.preferred_backend is original_engine
             assert app.query_one(ConfigView).dirty is True
             assert "Could not save configuration" in app.last_error
+
+    asyncio.run(run())
+
+
+class FallbackCoordinator(FakeCoordinator):
+    """Substitutes a marked fallback result exactly as the real coordinator does."""
+
+    def __init__(self, candidates, fallback_candidates):
+        super().__init__(candidates)
+        self.fallback_candidates = fallback_candidates
+
+    def search_with_fallback(
+        self,
+        request,
+        run_search,
+        fallback_language="",
+        auto_download=False,
+    ):
+        self.fallback_calls.append(
+            (request.language, fallback_language, auto_download)
+        )
+        primary = run_search(request)
+        if primary.candidates:
+            return primary
+        return CoordinatedSearchResult(
+            candidates=list(self.fallback_candidates),
+            used_fallback=True,
+            fallback_language=fallback_language,
+        )
+
+
+def test_fallback_candidates_are_shown_for_manual_choice(tmp_path):
+    media = tmp_path / "الهيبة.S01E03.mkv"
+    media.touch()
+    english = Candidate(
+        provider=Provider.SUBDL,
+        provider_id="en-1",
+        release="Al Hayba S01E03 WEB-DL",
+        language="en",
+        score=88,
+    )
+    coordinator = FallbackCoordinator([], [english])
+    app = SubsApp(
+        config={
+            "general": {
+                "preferred_backend": "subdl",
+                "skip_interactive_menu": True,
+                "fallback_language": "en",
+            },
+            "subdl": {
+                "api_key": "configured",
+                "languages": {"Arabic": "ar", "English": "en"},
+            },
+        },
+        media_paths=[str(media)],
+        overrides={},
+        coordinator=coordinator,
+    )
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.3)
+
+            assert coordinator.fallback_calls == [("ar", "en", False)]
+            assert [item.key for item in app.candidates] == [english.key]
+            assert app.notice == "No ar subtitles found. Showing en results."
+            assert app.state.queue[0].status is QueueStatus.AWAITING_PICK
 
     asyncio.run(run())

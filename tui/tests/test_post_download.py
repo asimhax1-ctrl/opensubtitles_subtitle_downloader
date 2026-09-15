@@ -17,9 +17,27 @@ from tui.search import CoordinatedSearchResult
 class FakeCoordinator:
     def __init__(self, candidate):
         self.candidate = candidate
+        self.fallback_calls = []
 
     def concrete(self, provider, request):
         return CoordinatedSearchResult(candidates=[self.candidate])
+
+    def search_with_fallback(
+        self,
+        request,
+        run_search,
+        fallback_language="",
+        auto_download=False,
+    ):
+        """Run the injected mode entry point and hand back whatever it returned.
+
+        The two-language orchestration belongs to and is tested against
+        SearchCoordinator.search_with_fallback.
+        """
+        self.fallback_calls.append(
+            (request.language, fallback_language, auto_download)
+        )
+        return run_search(request)
 
 
 class FakeJobs:

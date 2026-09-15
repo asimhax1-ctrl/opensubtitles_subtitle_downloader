@@ -700,14 +700,22 @@ class SubsApp(App):
         mode: EngineMode,
     ) -> None:
         self.call_from_thread(self._search_started, item_key, generation)
-        if mode is EngineMode.ALL_PROVIDERS:
-            result = self.coordinator.all_providers(request, self.health)
-        elif mode is EngineMode.AUTO:
-            result = self.coordinator.auto(request, self.health)
-        elif mode.provider:
-            result = self.coordinator.concrete(mode.provider, request)
-        else:
-            result = CoordinatedSearchResult()
+
+        def run_search(search_request: SearchRequest) -> CoordinatedSearchResult:
+            if mode is EngineMode.ALL_PROVIDERS:
+                return self.coordinator.all_providers(search_request, self.health)
+            if mode is EngineMode.AUTO:
+                return self.coordinator.auto(search_request, self.health)
+            if mode.provider:
+                return self.coordinator.concrete(mode.provider, search_request)
+            return CoordinatedSearchResult()
+
+        result = self.coordinator.search_with_fallback(
+            request,
+            run_search,
+            fallback_language=self.application_config.general.fallback_language,
+            auto_download=self.application_config.general.auto_fallback_download,
+        )
         self.call_from_thread(
             self._search_finished,
             item_key,
@@ -758,6 +766,19 @@ class SubsApp(App):
             self.notice = "No subtitles found. Try a broader query or All providers."
         else:
             self.notice = f"{len(result.candidates)} candidates ready"
+        if result.used_fallback:
+            # The target language found nothing, so these are fallback candidates.
+            # This runs on the app thread via call_from_thread, unlike the search
+            # itself, so notify() is safe here.
+            fallback_summary = (
+                f"No {request.language} subtitles found. Showing "
+                f"{result.fallback_language} results."
+                if result.candidates
+                else f"No {request.language} or {result.fallback_language} "
+                "subtitles found."
+            )
+            self.notice = fallback_summary
+            self.notify(fallback_summary, severity="warning")
         self._refresh_all()
         self.call_after_refresh(self._focus_results)
         if result.candidates and self.application_config.general.auto_selection:

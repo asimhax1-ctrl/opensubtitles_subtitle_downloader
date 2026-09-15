@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from library.OpenSubtitles import OpenSubtitles
@@ -305,7 +306,11 @@ def test_subsource_search_queries_drop_apostrophes(tmp_path):
 
     client._gather_candidates(media, "en")
 
-    assert queries == ["Widows Bay (2026)"]
+    # The primary query for the filename, with the apostrophe dropped. When nothing
+    # resolves, the alternate-name fallback may add further variant queries; what
+    # this test guards is the apostrophe handling on every one of them.
+    assert queries[0] == "Widows Bay (2026)"
+    assert all("'" not in name for name in queries)
 
 
 def test_opensubtitles_legacy_download_uses_external_output_directory(tmp_path):
@@ -527,3 +532,91 @@ def test_subsource_legacy_external_output_does_not_overwrite_existing_file(
 
     assert result is None
     assert existing.read_text(encoding="utf-8") == "old"
+
+
+# --- Alternate-name query variants ----------------------------------------
+
+MOVIE_FILENAME = "The.Pitt.2025.1080p.WEB-DL.x264-FLUX"
+
+
+def _has_arabic(text):
+    return bool(re.search(r"[؀-ۿ]", text))
+
+
+def test_get_alternate_names_generates_variants_for_a_movie():
+    # Regression: this returned None for any name without an episode number, so
+    # films received no alternate queries at all.
+    names = SubtitleUtils().get_alternate_names(MOVIE_FILENAME)
+
+    assert names
+    assert any("Pitt" in name for name in names)
+
+
+def test_get_alternate_names_movie_variants_include_the_year():
+    names = SubtitleUtils().get_alternate_names(MOVIE_FILENAME)
+
+    assert any("2025" in name for name in names)
+
+
+def test_get_alternate_names_keeps_the_original_title_as_a_variant():
+    names = SubtitleUtils().get_alternate_names(MOVIE_FILENAME)
+
+    # The filename's own title spelling leads the list: no article stripping, no
+    # folding, and no script split is allowed to displace it.
+    assert names[0].startswith("The.Pitt")
+
+
+def test_get_alternate_names_still_handles_episodes():
+    names = SubtitleUtils().get_alternate_names("The.Pitt.S01E01.1080p.WEB-DL")
+
+    assert names
+    assert any("S01E01" in name for name in names)
+
+
+def test_arabic_variant_is_additive_and_folded():
+    # The trailing teh marbuta (U+0629) folds to heh (U+0647), so the folded
+    # spelling is a genuinely different query string from the one on the filename.
+    # Providers index both, so both must be searched.
+    names = SubtitleUtils().get_alternate_names("الهيبة.S01E03.1080p.WEB-DL")
+
+    assert names
+    assert any("الهيبه" in name for name in names)
+
+
+def test_definite_article_is_stripped_from_a_long_token():
+    variants = SubtitleUtils._title_variants("المشروع")
+
+    assert "المشروع" in variants
+    assert "مشروع" in variants
+
+
+def test_definite_article_is_not_stripped_from_short_tokens():
+    # Boundary: a five-character token loses its article, a four-character one
+    # does not, because the remainder would be too short to be worth searching for.
+    five_char = SubtitleUtils._title_variants("البيت")
+    four_char = SubtitleUtils._title_variants("الحي")
+
+    assert "بيت" in five_char
+    assert four_char == ["الحي"]
+
+
+def test_definite_article_is_never_stripped_from_allah():
+    variants = SubtitleUtils._title_variants("الله")
+
+    assert "الله" in variants
+    # "الله" is four characters, so it is already protected by the length rule;
+    # stripping its article would yield "له".
+    assert "له" not in variants
+
+
+def test_mixed_script_stem_produces_one_variant_per_script():
+    variants = SubtitleUtils._title_variants("Al-Hayba.الهيبة.1080p")
+    names = SubtitleUtils().get_alternate_names("Al-Hayba.الهيبة.S01E03.1080p")
+
+    assert "الهيبة" in variants
+    assert any(
+        "Al-Hayba" in variant and not _has_arabic(variant) for variant in variants
+    )
+    assert names
+    assert any("الهيبة" in name for name in names)
+    assert any("Al-Hayba" in name or "Al Hayba" in name for name in names)

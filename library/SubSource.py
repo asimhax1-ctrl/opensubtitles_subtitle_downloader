@@ -363,8 +363,15 @@ class SubSource:
             media_name
         )
 
-        # Resolve candidate movieIds (one per season for TV).
+        # Resolve candidate movieIds (one per season for TV). Fall back to the
+        # alternate-name variants when the primary name resolves nothing, so
+        # SubSource searches the same query space as the other two providers.
         pairs = self._resolve_movie_ids(media_name, video_season, video_episode)
+        if not pairs:
+            for term in self.subtitle_utils.get_alternate_names(media_name) or []:
+                pairs = self._resolve_movie_ids(term, video_season, video_episode)
+                if pairs:
+                    break
 
         # If title search found nothing, try an imdb resolution via the filename's
         # embedded tt-id if present (rare, but cheap to check).

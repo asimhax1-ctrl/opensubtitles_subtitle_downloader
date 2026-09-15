@@ -636,6 +636,51 @@ class SubtitleUtils:
         target_tokens = set(cls._normalize_match_text(target_name).split())
         return min(10.0, 2.0 * len(source_tokens & target_tokens & terms))
 
+    # Arabic definite article. Stripping it turns "المشروع" into "مشروع", which is
+    # how providers sometimes index the same title. Only applied when the remainder
+    # is still a word worth searching for, and never to "الله".
+    DEFINITE_ARTICLE = "ال"
+
+    @classmethod
+    def _title_variants(cls, title):
+        """Every searchable spelling of one title: original, article-stripped, folded."""
+        title = (title or "").strip()
+        if not title:
+            return []
+        variants = [title]
+
+        stripped_tokens = []
+        for token in title.split():
+            if (
+                token.startswith(cls.DEFINITE_ARTICLE)
+                and token != "الله"
+                and len(token) >= 5
+                and len(token) - len(cls.DEFINITE_ARTICLE) >= 3
+            ):
+                stripped_tokens.append(token[len(cls.DEFINITE_ARTICLE) :])
+            else:
+                stripped_tokens.append(token)
+        stripped = " ".join(stripped_tokens)
+        if stripped != title:
+            variants.append(stripped)
+
+        for variant in list(variants):
+            folded = fold_arabic(variant)
+            if folded != variant:
+                variants.append(folded)
+
+        variants.extend(cls._script_split_variants(title))
+        return list(dict.fromkeys(variants))
+
+    @staticmethod
+    def _script_split_variants(title):
+        """Split a mixed Arabic/Latin title into one variant per script."""
+        latin = " ".join(re.findall(r"[A-Za-z0-9][A-Za-z0-9'&.-]*", title))
+        arabic = " ".join(re.findall(r"[؀-ۿ]+", title))
+        if not latin or not arabic:
+            return []
+        return [latin, arabic]
+
     def get_alternate_names(self, media_name):
         """Generate alternate name formats for the media"""
         try:
@@ -644,8 +689,6 @@ class SubtitleUtils:
 
             # First get season/episode since we have robust parsing for that
             season, episode = self.extract_season_and_episode(media_name)
-            if not episode:  # Need at least episode number
-                return None
 
             # Extract title and year, now knowing where season/episode info is
             # Remove common episode/season patterns
@@ -666,92 +709,66 @@ class SubtitleUtils:
             # Extract year if present
             year_match = re.search(r"\((\d{4})\)", clean_name)
             year = year_match.group(1) if year_match else ""
+            if not year:
+                loose_year = re.search(r"\b((?:19|20)\d{2})\b", clean_name)
+                year = loose_year.group(1) if loose_year else ""
             if year:
                 clean_name = re.sub(r"\s*\(\d{4}\)\s*", " ", clean_name)
+                clean_name = re.sub(rf"\b{year}\b", " ", clean_name)
 
             # Clean up title
             title = clean_name.strip().strip(".-_ ")
+            if not title:
+                return None
 
-            # Generate alternate formats
             formats = []
 
-            # Check for Mr. or Ms. in the title and create alternate versions
-            mr_match = re.search(r"Mr\.\s+(\w+)", title, re.IGNORECASE)
-            ms_match = re.search(r"Ms\.\s+(\w+)", title, re.IGNORECASE)
+            # Movies have no episode number: title-only variants. Previously this
+            # returned None, so films received no alternate queries at all.
+            if not episode:
+                for variant in self._title_variants(title):
+                    formats.append(variant)
+                    if year:
+                        formats.append(f"{variant} {year}")
+                        formats.append(f"{variant} ({year})")
+                return list(dict.fromkeys(formats))
 
-            if mr_match:
-                alternate_title = re.sub(r"Mr\.\s+", "", title, flags=re.IGNORECASE)
-                title_with_mister = re.sub(
-                    r"Mr\.", "Mister", title, flags=re.IGNORECASE
-                )
-                formats.extend([alternate_title, title_with_mister])
+            for variant in self._title_variants(title):
+                formats.extend(self._episode_formats(variant, year, season, episode))
 
-            if ms_match:
-                alternate_title = re.sub(r"Ms\.\s+", "", title, flags=re.IGNORECASE)
-                title_with_miss = re.sub(r"Ms\.", "Miss", title, flags=re.IGNORECASE)
-                formats.extend([alternate_title, title_with_miss])
-
-            # Basic formats
-            if season:
-                formats.extend(
-                    [
-                        f"{title} {season}x{episode:02d}",
-                        f"{title} S{season:02d}E{episode:02d}",
-                        f"{title} Episode #{season}.{episode:02d}",
-                    ]
-                )
-
-            # Add year if available
-            if year:
-                formats.extend(
-                    [
-                        f"{title} ({year}) - S{season:02d}E{episode:02d}",
-                        f"{title} ({year}) {season}x{episode:02d}",
-                    ]
-                )
-
-            # Special format for season 1
-            if season == 1:
-                formats.extend(
-                    [
-                        f"{title} E{episode:02d}",
-                        f"{title.lower().replace(' ', '.')}.E{episode:02d}",
-                    ]
-                )
-
-            # Web-style format
-            formats.append(
-                f"{title.lower().replace(' ', '-')}-episode-{season}-{episode}"
-            )
-
-            # If we found Mr. or Ms. alternates, also add their variations with season/episode
-            if mr_match or ms_match:
-                for alt_title in formats[
-                    :
-                ]:  # Create a copy of the list to iterate over
-                    if mr_match:
-                        alt_without_mr = re.sub(
-                            r"Mr\.\s+", "", alt_title, flags=re.IGNORECASE
-                        )
-                        alt_with_mister = re.sub(
-                            r"Mr\.", "Mister", alt_title, flags=re.IGNORECASE
-                        )
-                        formats.extend([alt_without_mr, alt_with_mister])
-                    if ms_match:
-                        alt_without_ms = re.sub(
-                            r"Ms\.\s+", "", alt_title, flags=re.IGNORECASE
-                        )
-                        alt_with_miss = re.sub(
-                            r"Ms\.", "Miss", alt_title, flags=re.IGNORECASE
-                        )
-                        formats.extend([alt_without_ms, alt_with_miss])
-
-            return list(
-                dict.fromkeys(formats)
-            )  # Remove duplicates while preserving order
+            return list(dict.fromkeys(formats))
         except Exception as e:
             self.console.print(f"[bold red]Error generating alternate names: {e}[/]")
             return None
+
+    @staticmethod
+    def _episode_formats(title, year, season, episode):
+        """Every episode-shaped spelling of one already-varied title."""
+        formats = []
+        if season:
+            formats.extend(
+                [
+                    f"{title} {season}x{episode:02d}",
+                    f"{title} S{season:02d}E{episode:02d}",
+                    f"{title} Episode #{season}.{episode:02d}",
+                ]
+            )
+        if year:
+            formats.extend(
+                [
+                    f"{title} ({year}) - S{season:02d}E{episode:02d}",
+                    f"{title} ({year}) {season}x{episode:02d}",
+                ]
+            )
+        if season == 1:
+            formats.extend(
+                [
+                    f"{title} E{episode:02d}",
+                    f"{title.lower().replace(' ', '.')}.E{episode:02d}",
+                ]
+            )
+        formats.append(f"{title.lower().replace(' ', '-')}-episode-{season}-{episode}")
+        return formats
 
     def normalize_score(self, score):
         """

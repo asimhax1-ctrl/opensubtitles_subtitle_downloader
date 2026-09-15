@@ -238,7 +238,16 @@ def _history(item):
 
 
 def test_ask_backend_remains_ask_until_user_selects(tmp_path):
-    config = ConfigRepository(tmp_path / "missing.yaml").load()
+    # ask is stated explicitly rather than left to the configured default: the
+    # Arabic Edition default is all-providers, and this test is about the ask mode's
+    # own stickiness, not about which mode an unconfigured run starts in.
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "general:\n"
+        "  preferred_backend: ask\n",
+        encoding="utf-8",
+    )
+    config = ConfigRepository(config_path).load()
 
     state = SessionState.from_config(config)
 

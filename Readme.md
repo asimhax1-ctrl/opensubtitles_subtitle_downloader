@@ -137,12 +137,14 @@ and add it to the `subsource` section.
 
 ```yaml
 general: # Explicit CLI options override these settings for one run.
-  preferred_backend: ask # Options: opensubtitles, subdl, subsource, auto, all-providers, ask
-  default_language: "" # ISO code. Set this explicitly for predictable unattended runs.
+  preferred_backend: all-providers # Options: ask, auto, all-providers, opensubtitles, subdl, subsource
+  default_language: ar # ISO-639-1 code; use "en" for English
+  fallback_language: en # Searched only when the target language yields nothing; empty disables
+  auto_fallback_download: false # Opt in to downloading the best fallback candidate automatically
   recursive_search: false # Recursively discover video files under folder inputs.
   subtitle_output_directory: "" # Empty saves beside each video. Relative paths resolve from this config file.
   skip_interactive_menu: false # Options: true, false
-  sync_audio_to_subs: ask # Options: true, false, ask
+  sync_audio_to_subs: false # Options: true, false, ask
   auto_selection: false
   opt_force_utf8: true
   no_tui: false # Options: true, false. Set true to skip the Textual interface. Override per-run with --tui / --no-tui.
@@ -207,10 +209,12 @@ Important settings:
 | --------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | `preferred_backend`         | `opensubtitles`, `subdl`, `subsource`, `auto`, `all-providers`, `ask` | Selects the provider behavior.                                                         |
 | `default_language`          | ISO language code or empty string                                     | Sets the run's language; empty falls back to the first relevant configured language.   |
+| `fallback_language`         | ISO language code or empty string                                     | Searched only when the target language returns no candidates; empty disables fallback searching. |
+| `auto_fallback_download`    | `true`, `false`                                                       | Downloads the best fallback candidate automatically; `false` shows fallback candidates for manual choice. |
 | `recursive_search`          | `true`, `false`                                                       | Recursively discovers videos below folder inputs.                                      |
 | `subtitle_output_directory` | path or empty string                                                  | Saves subtitles in one writable directory; empty saves beside each video.              |
 | `skip_interactive_menu`     | `true`, `false`                                                       | Skips the TUI's initial language confirmation; `preferred_backend: ask` still opens the provider selector. |
-| `sync_audio_to_subs`        | `true`, `false`, `ask`                                                | Always or never synchronize; `ask` prompts in the TUI and skips sync in no-TUI mode.   |
+| `sync_audio_to_subs`        | `true`, `false`, `ask`                                                | Always or never synchronize; `ask` prompts in the TUI and skips sync in no-TUI mode. Defaults to `false`. |
 | `auto_selection`            | `true`, `false`                                                       | Automatically downloads the top TUI result; no-TUI mode always selects the top result. |
 | `opt_force_utf8`            | `true`, `false`                                                       | Normalizes downloaded subtitle text to UTF-8.                                          |
 | `no_tui`                    | `true`, `false`                                                       | Skips the Textual interface by default when set to `true`.                             |
@@ -245,6 +249,30 @@ To remove additional advertising lines, point
 `cleaning_subtitles.ads.file_path` to a text file containing entries separated
 by `cleaning_subtitles.ads.separator`. When no path is set, the bundled list is
 used.
+
+### Arabic Edition defaults
+
+This fork ships Arabic-first defaults that differ from upstream
+(`ach-raf/opensubtitles_subtitle_downloader`). A user who never configures a language
+will see different behaviour from upstream:
+
+| Setting | This fork | Upstream |
+|---|---|---|
+| `general.default_language` | `ar` | empty |
+| `general.preferred_backend` | `all-providers` | `ask` |
+| `general.sync_audio_to_subs` | `false` | `ask` |
+
+Each can be reverted individually with no code change: `--lang en`,
+`general.default_language: en`, `preferred_backend: ask`, and
+`sync_audio_to_subs: ask`.
+
+Two further settings control the English fallback:
+
+- `general.fallback_language` (default `en`) — searched only when the target language
+  yields no candidates. An empty value disables fallback searching entirely.
+- `general.auto_fallback_download` (default `false`) — when false, fallback candidates
+  are shown for manual choice and never downloaded automatically. In no-TUI mode they
+  are reported and the run exits without downloading.
 
 ## Usage
 

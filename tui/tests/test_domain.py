@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from tui.domain import Candidate, EngineMode, Provider, SearchRequest
+from tui.domain import (
+    Candidate,
+    EngineMode,
+    Provider,
+    SearchRequest,
+    compatibility_summary,
+)
 
 
 def test_all_providers_is_a_backend_mode():
@@ -71,6 +77,55 @@ def test_candidate_public_dict_includes_format_and_match_reasons():
 
     assert public["format"] == "ass"
     assert public["match_reasons"] == ["exact hash match"]
+
+
+def test_candidate_public_dict_includes_compatibility_and_its_evidence():
+    # The JSON view is read by the launcher's consumers, so the percentage that
+    # orders the rows travels with the lines that justify it.
+    candidate = Candidate(
+        provider=Provider.SUBDL,
+        provider_id="1",
+        release="R",
+        language="ar",
+        compatibility=86,
+        compatibility_badge="GREAT",
+        compatibility_evidence=("Evidence:", "+ exact title"),
+        compatibility_conflicts=(),
+    )
+
+    public = candidate.as_public_dict()
+
+    assert public["compatibility"] == 86
+    assert public["compatibility_badge"] == "GREAT"
+    assert public["compatibility_evidence"] == ["Evidence:", "+ exact title"]
+    assert public["compatibility_conflicts"] == []
+
+
+def test_compatibility_summary_is_a_dash_when_nothing_was_measured():
+    # A candidate the compatibility engine never saw must not be described as
+    # "0% MISMATCH": not measuring a match is not the same as measuring no match.
+    candidate = Candidate(
+        provider=Provider.SUBDL,
+        provider_id="1",
+        release="R",
+        language="ar",
+    )
+
+    assert compatibility_summary(candidate) == "Compatibility: —"
+
+
+def test_compatibility_summary_names_the_badge_and_the_percentage():
+    candidate = Candidate(
+        provider=Provider.SUBDL,
+        provider_id="1",
+        release="R",
+        language="ar",
+        compatibility=42,
+        compatibility_badge="MISMATCH",
+        compatibility_evidence=("Conflict:", "media: Theatrical"),
+    )
+
+    assert compatibility_summary(candidate) == "Compatibility: 42% MISMATCH"
 
 
 def test_candidate_defaults_are_format_none_and_no_reasons():

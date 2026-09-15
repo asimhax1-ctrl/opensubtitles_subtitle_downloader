@@ -246,6 +246,255 @@ def test_provider_reliability_values_are_derived_from_auto_priority():
     }
 
 
+def _media_request(media_name, language="ar"):
+    return SearchRequest(
+        media_path=media_name,
+        query=media_name,
+        language=language,
+    )
+
+
+def _release_candidate(provider, provider_id, release, language="ar", **overrides):
+    return Candidate(
+        provider=provider,
+        provider_id=provider_id,
+        release=release,
+        language=language,
+        **overrides,
+    )
+
+
+def _compatibilities(result):
+    return [item.compatibility for item in result.candidates]
+
+
+def test_results_are_ordered_by_the_compatibility_the_user_is_shown():
+    # The number in the Fit column and the order of the rows come from the same
+    # field, so the table cannot show an order its own percentages contradict.
+    media = "Amadeus (1984) 2160p BluRay x264-GROUP"
+    releases = [
+        "Amadeus.1985.2160p.BluRay.x264-GROUP",  # wrong year
+        "Amadeus.1984.2160p.BluRay.x264-GROUP",  # exact
+        "Amadeus.1984.480p.DVDRip.xvid-GROUP",  # exact title, wrong source
+        "Unrelated.1984.2160p.BluRay.x264-GROUP",  # wrong title
+    ]
+    adapters = {
+        Provider.SUBDL: FakeAdapter(
+            Provider.SUBDL,
+            [
+                _release_candidate(Provider.SUBDL, str(index), release)
+                for index, release in enumerate(releases)
+            ],
+        )
+    }
+
+    result = SearchCoordinator(adapters).all_providers(_media_request(media))
+
+    shown = _compatibilities(result)
+    assert shown == sorted(shown, reverse=True)
+    assert result.candidates[0].release == releases[1]
+    # A wrong title must not outrank a wrong year: identity dominates, so the
+    # unrelated release sorts last rather than somewhere in the middle.
+    assert result.candidates[-1].release == releases[3]
+
+
+def test_an_exact_hash_outranks_every_filename_only_match():
+    media = "Amadeus (1984) 2160p BluRay x264-GROUP"
+    adapters = {
+        Provider.SUBDL: FakeAdapter(
+            Provider.SUBDL,
+            [
+                _release_candidate(
+                    Provider.SUBDL,
+                    "by-name",
+                    "Amadeus.1984.2160p.BluRay.x264-GROUP",
+                ),
+                # The weaker provider on purpose: the hash must win on evidence
+                # alone, not on the reliability tiebreak behind it.
+                _release_candidate(
+                    Provider.SUBDL,
+                    "by-hash",
+                    "Amadeus.1984.2160p.BluRay.x264-GROUP",
+                    hash_match=True,
+                ),
+            ],
+        )
+    }
+
+    result = SearchCoordinator(adapters).all_providers(_media_request(media))
+
+    assert result.candidates[0].provider_id == "by-hash"
+    assert result.candidates[0].compatibility == 100
+    assert result.candidates[0].compatibility > result.candidates[1].compatibility
+
+
+def test_download_count_does_not_change_compatibility():
+    # Popularity is not evidence about the file. Two things must hold: a heavily
+    # downloaded release with weaker evidence may not overtake a stronger one, and
+    # the percentage a release earns may not move with its download count.
+    media = "Amadeus (1984) 2160p BluRay x264-GROUP"
+    strong = "Amadeus.1984.2160p.BluRay.x264-GROUP"
+    weak = "Amadeus.1985.480p.DVDRip.xvid-OTHER"
+    adapters = {
+        Provider.SUBDL: FakeAdapter(
+            Provider.SUBDL,
+            [
+                _release_candidate(
+                    Provider.SUBDL, "popular-but-weak", weak, download_count=900_000
+                ),
+                _release_candidate(
+                    Provider.SUBDL, "quiet-but-strong", strong, download_count=1
+                ),
+            ],
+        )
+    }
+
+    result = SearchCoordinator(adapters).all_providers(_media_request(media))
+
+    assert result.candidates[0].provider_id == "quiet-but-strong"
+    assert result.candidates[0].compatibility > result.candidates[1].compatibility
+
+    adapters[Provider.SUBDL] = FakeAdapter(
+        Provider.SUBDL,
+        [
+            _release_candidate(
+                Provider.SUBDL, "same-evidence", strong, download_count=900_000
+            )
+        ],
+    )
+    popular = SearchCoordinator(adapters).all_providers(_media_request(media))
+
+    assert (
+        popular.candidates[0].compatibility
+        == result.candidates[0].compatibility
+    )
+
+
+def test_provider_reliability_only_separates_otherwise_equal_candidates():
+    media = "Amadeus (1984) 2160p BluRay x264-GROUP"
+    adapters = {
+        # SubSource is the most reliable provider, SubDL the least, so a result
+        # that wins here won on compatibility rather than on its provider.
+        Provider.SUBSOURCE: FakeAdapter(
+            Provider.SUBSOURCE,
+            [
+                _release_candidate(
+                    Provider.SUBSOURCE,
+                    "weaker-evidence",
+                    "Amadeus.1985.480p.DVDRip.xvid-OTHER",
+                )
+            ],
+        ),
+        Provider.SUBDL: FakeAdapter(
+            Provider.SUBDL,
+            [
+                _release_candidate(
+                    Provider.SUBDL,
+                    "stronger-evidence",
+                    "Amadeus.1984.2160p.BluRay.x264-GROUP",
+                )
+            ],
+        ),
+    }
+
+    result = SearchCoordinator(adapters).all_providers(_media_request(media))
+
+    assert result.candidates[0].provider_id == "stronger-evidence"
+    assert PROVIDER_RELIABILITY[Provider.SUBDL] < PROVIDER_RELIABILITY[
+        Provider.SUBSOURCE
+    ]
+
+
+def test_provider_reliability_breaks_a_tie_on_equal_compatibility():
+    # Same release name, so the evidence is identical and only the tiebreak can
+    # decide: the more reliable provider takes the earlier row.
+    release = "Amadeus.1984.2160p.BluRay.x264-GROUP"
+    adapters = {
+        Provider.SUBDL: FakeAdapter(
+            Provider.SUBDL,
+            [_release_candidate(Provider.SUBDL, "low", release)],
+        ),
+        Provider.SUBSOURCE: FakeAdapter(
+            Provider.SUBSOURCE,
+            [_release_candidate(Provider.SUBSOURCE, "high", release)],
+        ),
+    }
+
+    result = SearchCoordinator(adapters).all_providers(_media_request("Amadeus (1984)"))
+
+    assert _compatibilities(result)[0] == _compatibilities(result)[1]
+    assert result.candidates[0].provider is Provider.SUBSOURCE
+
+
+def test_compatibility_uses_the_media_file_name_when_the_query_is_weaker():
+    # The user may have typed a search term that matches nothing in the release
+    # name. The ranking still has to reflect the file on disk.
+    adapters = {
+        Provider.SUBDL: FakeAdapter(
+            Provider.SUBDL,
+            [
+                _release_candidate(
+                    Provider.SUBDL, "right", "Amadeus.1984.1080p.BluRay.x264-G"
+                ),
+                _release_candidate(
+                    Provider.SUBDL, "wrong", "Amelie.2001.1080p.BluRay.x264-G"
+                ),
+            ],
+        )
+    }
+    request = SearchRequest(
+        media_path="Amadeus (1984) 1080p BluRay x264-G.mkv",
+        query="zzz no match zzz",
+        language="ar",
+    )
+
+    result = SearchCoordinator(adapters).all_providers(request)
+
+    assert result.candidates[0].provider_id == "right"
+    assert result.candidates[0].compatibility > result.candidates[1].compatibility
+
+
+def test_a_candidate_the_engine_never_saw_reports_no_measurement():
+    # With no media name to compare against there is no evidence, and the panes
+    # must say so rather than claim a confident 0%.
+    adapters = {
+        Provider.SUBDL: FakeAdapter(
+            Provider.SUBDL, [_release_candidate(Provider.SUBDL, "1", "Amadeus")]
+        )
+    }
+    request = SearchRequest(media_path="", query="", language="ar")
+
+    result = SearchCoordinator(adapters).all_providers(request)
+
+    assert result.candidates[0].compatibility == 0
+    assert result.candidates[0].compatibility_evidence == ()
+
+
+def test_an_unavailable_compatibility_engine_still_ranks_a_hash_match_first():
+    # library/ is optional at runtime: the TUI has to stay usable when its import
+    # fails. Every candidate then reports no measurement, so the hash flag is the
+    # only evidence left and must still sort above a filename-only match.
+    adapters = {
+        Provider.SUBDL: FakeAdapter(
+            Provider.SUBDL,
+            [
+                _release_candidate(Provider.SUBDL, "by-name", "Amadeus.1984"),
+                _release_candidate(
+                    Provider.SUBDL, "by-hash", "Amadeus.1984", hash_match=True
+                ),
+            ],
+        )
+    }
+    coordinator = SearchCoordinator(adapters)
+    coordinator.compatibility_engine = None
+
+    result = coordinator.all_providers(_media_request("Amadeus (1984) 2160p BluRay"))
+
+    assert result.candidates[0].provider_id == "by-hash"
+    assert [item.compatibility for item in result.candidates] == [0, 0]
+    assert all(item.compatibility_evidence == () for item in result.candidates)
+
+
 def test_match_reasons_include_the_provider_reason():
     adapters = {
         Provider.SUBDL: FakeAdapter(

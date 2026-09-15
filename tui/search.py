@@ -64,6 +64,14 @@ class SearchCoordinator:
         scorer: Any | None = None,
     ) -> None:
         self.adapters = adapters
+        # Imported here rather than at module scope, which is the same reason and
+        # the same shape as the scorer import below.
+        try:
+            from library import compatibility as compatibility_engine
+
+            self.compatibility_engine: Any | None = compatibility_engine
+        except Exception:
+            self.compatibility_engine = None
         if scorer is None:
             try:
                 from library.subtitle_utils import SubtitleUtils
@@ -280,6 +288,32 @@ class SearchCoordinator:
         composed.insert(MATCH_REASON_PROVIDER_INDEX, provider_reason(provider))
         return tuple(composed[:MAX_MATCH_REASONS])
 
+    def _media_evidence_name(self, request: SearchRequest) -> str:
+        """What a candidate's compatibility is measured against.
+
+        The media file itself is the question being asked, so it comes first;
+        the query is the fallback for a search that was not started from a file
+        name that says anything.
+        """
+        engine = self.compatibility_engine
+        if engine is None:
+            return ""
+        return engine.media_evidence_name(request.media_path) or request.query.strip()
+
+    def _apply_compatibility(self, candidate: Candidate, media_name: str) -> None:
+        engine = self.compatibility_engine
+        if engine is None or not media_name:
+            return
+        match = engine.compatibility(
+            candidate.release,
+            media_name,
+            candidate.hash_match,
+        )
+        candidate.compatibility = match.percent
+        candidate.compatibility_badge = match.badge
+        candidate.compatibility_evidence = match.evidence_lines()
+        candidate.compatibility_conflicts = match.conflicts
+
     def _prepare(
         self,
         candidates: list[Candidate],
@@ -293,7 +327,9 @@ class SearchCoordinator:
         deduplicated = {candidate.key: candidate for candidate in filtered}
         score_target = request.query.strip() or Path(request.media_path).stem
         target_language = (request.language or "").strip().lower()
+        media_name = self._media_evidence_name(request)
         for candidate in deduplicated.values():
+            self._apply_compatibility(candidate, media_name)
             if self.scorer is None:
                 continue
             score, reasons = self._explain(candidate, score_target)
@@ -302,11 +338,15 @@ class SearchCoordinator:
                 reasons,
                 candidate.provider,
             )
+        # Compatibility leads because it is the question the user asked: how well
+        # does this subtitle match my file. Provider reliability and download
+        # count only separate results that are otherwise equally compatible, and
+        # neither is an input to the percentage itself.
         return sorted(
             deduplicated.values(),
             key=lambda item: (
                 int((item.language or "").strip().lower() == target_language),
-                item.score,
+                item.compatibility,
                 item.hash_match,
                 PROVIDER_RELIABILITY.get(item.provider, 0),
                 item.download_count,

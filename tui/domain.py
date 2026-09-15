@@ -95,6 +95,15 @@ class Candidate:
     format: str | None = None
     match_reasons: tuple[str, ...] = ()
     score: float = 0.0
+    # Verified compatibility with the media file, 0-100, and the evidence behind
+    # it, computed by library.compatibility and rendered verbatim. It is what the
+    # results are ordered by and what the panes explain, so the two cannot
+    # disagree. ``score`` above is the older release-name score and no longer
+    # ranks anything.
+    compatibility: int = 0
+    compatibility_badge: str = ""
+    compatibility_evidence: tuple[str, ...] = ()
+    compatibility_conflicts: tuple[str, ...] = ()
     raw_flags: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -117,7 +126,25 @@ class Candidate:
             "format": self.format,
             "match_reasons": list(self.match_reasons),
             "score": self.score,
+            "compatibility": self.compatibility,
+            "compatibility_badge": self.compatibility_badge,
+            "compatibility_evidence": list(self.compatibility_evidence),
+            "compatibility_conflicts": list(self.compatibility_conflicts),
         }
+
+
+def compatibility_summary(candidate: Candidate) -> str:
+    """The compatibility headline the panes show for one candidate.
+
+    Both panes render this, so the two can never report a different verdict for
+    the same candidate. A dash rather than "0% MISMATCH" when nothing was
+    measured: not measuring a match is not the same as measuring no match.
+    """
+    if not candidate.compatibility_evidence:
+        return "Compatibility: —"
+    return (
+        f"Compatibility: {candidate.compatibility}% {candidate.compatibility_badge}"
+    )
 
 
 @dataclass

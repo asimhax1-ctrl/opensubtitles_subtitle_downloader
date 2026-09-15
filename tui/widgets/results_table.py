@@ -38,7 +38,7 @@ class ResultsTable(DataTable):
                 candidate.hearing_impaired,
                 candidate.ai_translated,
                 candidate.download_count,
-                candidate.score,
+                candidate.compatibility,
             )
             for candidate in app.candidates
         )
@@ -61,7 +61,7 @@ class ResultsTable(DataTable):
                 candidate.format or "",
                 Text.from_markup(" ".join(flags)),
                 _count(candidate.download_count),
-                _score(candidate.score),
+                _fit(candidate.compatibility),
             ]
             if app.all_providers_mode:
                 # Index 3, not 2: the columns are declared # Release L Source Fmt ...
@@ -109,7 +109,9 @@ class ResultsTable(DataTable):
         # because rung 1 of the width ladder pays for the new column there, and it
         # loses nothing below 100 rows; Flags at 4 would clip "HI AI" and Release
         # cannot go below 71 (test_app.py asserts it). D/L must stay 5 (it renders
-        # "48.2k") and Match must stay 4 (it renders " 100").
+        # "48.2k") and Fit must stay 4, which is the whole width of "100%" -- the
+        # percentage is not padded, so the column needs no more room than the
+        # Match score it replaces.
         self.add_column("#", width=2)
         self.add_column("Release", width=62 if all_providers_mode else 71)
         self.add_column("L", width=2)
@@ -118,7 +120,7 @@ class ResultsTable(DataTable):
         self.add_column("Fmt", width=4)
         self.add_column("Flags", width=5)
         self.add_column("D/L", width=5)
-        self.add_column("Match", width=4)
+        self.add_column("Fit", width=4)
         self._rendered_all_providers_mode = all_providers_mode
 
 
@@ -126,5 +128,5 @@ def _count(value: int) -> str:
     return f"{value / 1000:.1f}k" if value >= 1000 else str(value)
 
 
-def _score(value: float) -> Text:
-    return Text.from_markup(f" [yellow]{value:.0f}[/yellow]")
+def _fit(value: int) -> Text:
+    return Text.from_markup(f"[yellow]{value}%[/yellow]")

@@ -43,6 +43,7 @@ from tui.domain import (
     QueueItem,
     QueueStatus,
     SearchRequest,
+    compatibility_summary,
 )
 from tui.jobs import JobCoordinator
 from tui.keymap import Action, Keymap
@@ -248,9 +249,9 @@ class CandidatePreview(ModalScreen[None]):
                 f"Format       {candidate.format or '—'}\n"
                 f"Uploader     {candidate.author}\n"
                 f"Downloads    {candidate.download_count:,}\n"
-                f"Match score  {candidate.score:.0f}\n"
-                f"Reasons      {' · '.join(candidate.match_reasons) or '—'}\n"
-                f"Hash / HI / AI  "
+                f"{compatibility_summary(candidate)}\n"
+                + "".join(f"{line}\n" for line in candidate.compatibility_evidence)
+                + f"Hash / HI / AI  "
                 f"{'yes' if candidate.hash_match else 'no'} / "
                 f"{'yes' if candidate.hearing_impaired else 'no'} / "
                 f"{'yes' if candidate.ai_translated else 'no'}\n\n"

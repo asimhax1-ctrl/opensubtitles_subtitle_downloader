@@ -4,6 +4,8 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Static
 
+from tui.domain import compatibility_summary
+
 
 class DetailPane(VerticalScroll):
     def compose(self) -> ComposeResult:
@@ -47,14 +49,13 @@ class DetailPane(VerticalScroll):
             f"{format_suffix}"
         )
         detail.update(
-            f"[dim]Uploader[/dim]   {candidate.author or '—'}\n"
-            f"[dim]Downloads[/dim]  {candidate.download_count:,}\n"
-            f"[dim]Match[/dim]      [yellow]{candidate.score:.0f}[/yellow]\n"
-            f"[dim]Reasons[/dim]    "
-            f"{' · '.join(candidate.match_reasons) or '—'}\n"
-            f"[dim]Hash match[/dim] "
+            f"[dim]Uploader[/dim]      {candidate.author or '—'}\n"
+            f"[dim]Downloads[/dim]     {candidate.download_count:,}\n"
+            f"{compatibility_summary(candidate)}\n"
+            + "".join(f"{line}\n" for line in candidate.compatibility_evidence)
+            + f"[dim]Hash match[/dim]    "
             f"{'[green]yes · exact file[/green]' if candidate.hash_match else 'no'}\n"
-            f"[dim]Flags[/dim]      "
+            f"[dim]Flags[/dim]         "
             f"HI {'yes' if candidate.hearing_impaired else 'no'} · "
             f"AI {'yes' if candidate.ai_translated else 'no'}"
         )

@@ -17,8 +17,8 @@ from tui.app import (
     SubsApp,
 )
 from tui.config import ConfigRepository
-from tui.domain import Candidate, EngineMode, Provider, QueueStatus
-from tui.search import CoordinatedSearchResult
+from tui.domain import Candidate, EngineMode, Provider, ProviderSearchResult, QueueStatus
+from tui.search import CoordinatedSearchResult, SearchCoordinator
 from tui.widgets.overlays.engine_switcher import EngineSwitcher
 from tui.widgets.overlays.lang_popover import LanguagePopover
 from tui.widgets.results_table import ResultsTable
@@ -110,6 +110,8 @@ def test_startup_uses_configured_media_extension_overrides(tmp_path):
 def configured_app(tmp_path):
     media = tmp_path / "الهيبة.S01E03.mkv"
     media.touch()
+    # The coordinator is fake, so the compatibility fields the real search
+    # pipeline would derive are set here, the same way ``score`` always was.
     candidates = [
         Candidate(
             provider=Provider.SUBDL,
@@ -118,6 +120,14 @@ def configured_app(tmp_path):
             language="ar",
             download_count=2400,
             score=94,
+            compatibility=94,
+            compatibility_badge="BEST",
+            compatibility_evidence=(
+                "Evidence:",
+                "+ exact title",
+                "+ S01E03",
+                "- no hash match",
+            ),
         ),
         Candidate(
             provider=Provider.SUBDL,
@@ -125,6 +135,14 @@ def configured_app(tmp_path):
             release="Al Hayba S01E03",
             language="ar",
             score=81,
+            compatibility=81,
+            compatibility_badge="GREAT",
+            compatibility_evidence=(
+                "Evidence:",
+                "+ partial title",
+                "+ S01E03",
+                "- no hash match",
+            ),
         ),
     ]
     coordinator = FakeCoordinator(candidates)
@@ -807,16 +825,21 @@ def test_results_and_multilingual_detail_are_visible(configured_app):
             assert app.query_one(ResultsTable).row_count == 2
             assert "الهيبة" in app.query_one("#detail-title", Static).content
             detail = str(app.query_one("#detail-kv", Static).content)
-            assert "Match" in detail
-            assert "94" in detail
+            assert "Compatibility: 94% BEST" in detail
+            selected = app.current_candidate()
+            for line in selected.compatibility_evidence:
+                assert line in detail
             hash_line = next(
                 line for line in detail.splitlines() if "[dim]Hash match[/dim]" in line
             )
             assert hash_line.endswith("no")
-            # Five budgeted lines: Uploader, Downloads, Match, Reasons, Hash match,
-            # Flags. The Reasons line is required by the Arabic Edition spec, so the
-            # guard moved from 4 to 5; it still catches unbounded growth.
-            assert detail.count("\n") <= 5
+            # The detail block is Uploader, Downloads, the Compatibility headline,
+            # the evidence lines the engine emitted, Hash match and Flags: four
+            # fixed newlines plus one per evidence line. The engine emits at most
+            # eleven (a header, a title signal, one per facet, a hash signal), so
+            # fifteen is the ceiling -- a real bound, not a hand-tuned number, and
+            # it still catches a renderer that grows without bound.
+            assert detail.count("\n") <= 15
             assert str(app.query_one("#download-selected", Button).label) == "Get  ↵"
             assert str(app.query_one("#preview-selected", Button).label) == "View  p"
             assert str(app.query_one("#copy-url", Button).label) == "URL  y"
@@ -861,7 +884,7 @@ def test_search_workbench_exposes_mockup_panel_content(configured_app):
             assert results_panel.region.width >= detail_panel.region.width * 2
             assert 30 <= detail_panel.region.width <= 42
             assert "RESULTS" in app.query_one("#results-heading", Static).content
-            assert "sorted by match" in app.query_one(
+            assert "sorted by fit" in app.query_one(
                 "#results-heading", Static
             ).content.lower()
             assert "PREVIEW" in app.query_one("#preview-heading", Static).content
@@ -871,7 +894,7 @@ def test_search_workbench_exposes_mockup_panel_content(configured_app):
     asyncio.run(run())
 
 
-def test_results_table_keeps_release_and_numeric_score_visible(configured_app):
+def test_results_table_keeps_release_and_fit_percentage_visible(configured_app):
     app, coordinator = configured_app
     coordinator.candidates = [
         Candidate(
@@ -884,6 +907,11 @@ def test_results_table_keeps_release_and_numeric_score_visible(configured_app):
             language="en",
             download_count=48213,
             score=100,
+            # The widest value the column ever renders, so the width check below
+            # is the real worst case rather than a comfortable sample.
+            compatibility=100,
+            compatibility_badge="BEST",
+            compatibility_evidence=("Evidence:", "+ exact title", "- no hash match"),
         )
     ]
 
@@ -897,12 +925,64 @@ def test_results_table_keeps_release_and_numeric_score_visible(configured_app):
             assert release_column.label.plain == "Release"
             assert release_column.width >= 71
             assert table.get_cell_at((0, 2)) == "EN"
-            rendered_score = table.get_cell_at((0, len(table.columns) - 1))
-            score_column = list(table.columns.values())[-1]
-            assert score_column.label.plain == "Match"
-            assert rendered_score.plain == " 100"
-            assert len(rendered_score.plain) <= score_column.width
+            rendered_fit = table.get_cell_at((0, len(table.columns) - 1))
+            fit_column = list(table.columns.values())[-1]
+            assert fit_column.label.plain == "Fit"
+            assert rendered_fit.plain == "100%"
+            assert len(rendered_fit.plain) <= fit_column.width
             assert table.max_scroll_x == 0
+
+    asyncio.run(run())
+
+
+def test_rendered_fit_column_matches_the_order_the_rows_arrived_in(configured_app):
+    # End to end through the real search coordinator: what the Fit column shows
+    # must equal each candidate's compatibility, in the order they were ranked.
+    # A table that re-sorted, or read the wrong field, would disagree here.
+    app, _ = configured_app
+    releases = [
+        "Amadeus.1985.2160p.BluRay.x264-GROUP",
+        "Amadeus.1984.2160p.BluRay.x264-GROUP",
+        "Unrelated.1984.2160p.BluRay.x264-GROUP",
+    ]
+
+    class Adapter:
+        provider = Provider.SUBDL
+
+        def search(self, request):
+            return ProviderSearchResult(
+                provider=Provider.SUBDL,
+                candidates=[
+                    Candidate(
+                        provider=Provider.SUBDL,
+                        provider_id=str(index),
+                        release=release,
+                        language="ar",
+                    )
+                    for index, release in enumerate(releases)
+                ],
+            )
+
+    app.coordinator = SearchCoordinator({Provider.SUBDL: Adapter()})
+
+    async def run():
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.3)
+            await pilot.press("f5")
+            await pilot.pause(0.3)
+
+            table = app.query_one(ResultsTable)
+            rendered = [
+                table.get_cell_at((row, len(table.columns) - 1)).plain
+                for row in range(table.row_count)
+            ]
+            expected = [f"{item.compatibility}%" for item in app.candidates]
+
+            assert table.row_count == len(releases)
+            assert rendered == expected
+            assert [item.compatibility for item in app.candidates] == sorted(
+                (item.compatibility for item in app.candidates), reverse=True
+            )
 
     asyncio.run(run())
 
@@ -1478,7 +1558,7 @@ def test_all_providers_mode_keeps_language_and_source_in_their_columns(configure
             await pilot.pause(0.3)
 
             table = app.query_one(ResultsTable)
-            # Columns are # Release L Source Fmt Flags D/L Match in this mode.
+            # Columns are # Release L Source Fmt Flags D/L Fit in this mode.
             assert str(table.get_cell_at((0, 2))) == "EN"
             # The provider cell carries deliberate leading padding for the Source
             # column, so it is compared stripped.
@@ -1488,22 +1568,44 @@ def test_all_providers_mode_keeps_language_and_source_in_their_columns(configure
     asyncio.run(run())
 
 
-def test_detail_pane_shows_format_and_match_reasons(configured_app):
+DETAIL_EVIDENCE = (
+    "Evidence:",
+    "+ exact title",
+    "+ year 1984",
+    "+ BluRay",
+    "+ 2160p",
+    "- edition unknown",
+    "- no hash match",
+)
+
+DETAIL_CONFLICT = (
+    "Conflict:",
+    "media: Theatrical",
+    "subtitle: Director's Cut",
+)
+
+
+def _detail_candidate(**overrides) -> Candidate:
+    values = {
+        "provider": Provider.SUBDL,
+        "provider_id": "arabic-ass",
+        "release": "الهيبة.S01E03.WEB-DL",
+        "language": "ar",
+        "format": "ass",
+        "score": 94,
+        "compatibility": 94,
+        "compatibility_badge": "BEST",
+        "compatibility_evidence": DETAIL_EVIDENCE,
+    }
+    values.update(overrides)
+    return Candidate(**values)
+
+
+def test_detail_pane_shows_format_and_compatibility_evidence(configured_app):
+    # The verbose badge and its evidence live here rather than in the table, so
+    # this pane is the only place the user can see why a result outranks another.
     app, coordinator = configured_app
-    coordinator.candidates = [
-        Candidate(
-            provider=Provider.SUBDL,
-            provider_id="arabic-ass",
-            release="الهيبة.S01E03.WEB-DL",
-            language="ar",
-            format="ass",
-            match_reasons=(
-                "movie/episode match",
-                "provider: SubDL (reliability 1/3)",
-            ),
-            score=94,
-        )
-    ]
+    coordinator.candidates = [_detail_candidate()]
 
     async def run():
         async with app.run_test(size=(140, 42)) as pilot:
@@ -1513,8 +1615,36 @@ def test_detail_pane_shows_format_and_match_reasons(configured_app):
             detail = str(app.query_one("#detail-kv", Static).content)
 
             assert "ass" in provider_line
-            assert "movie/episode match" in detail
-            assert "provider: SubDL (reliability 1/3)" in detail
+            assert "Compatibility: 94% BEST" in detail
+            for line in DETAIL_EVIDENCE:
+                assert line in detail
+
+    asyncio.run(run())
+
+
+def test_detail_pane_shows_a_conflict_block_instead_of_evidence(configured_app):
+    # A known conflict is what the user must be able to see, so it replaces the
+    # evidence block rather than sitting beside a misleading set of pluses.
+    app, coordinator = configured_app
+    coordinator.candidates = [
+        _detail_candidate(
+            compatibility=32,
+            compatibility_badge="MISMATCH",
+            compatibility_evidence=DETAIL_CONFLICT,
+            compatibility_conflicts=DETAIL_CONFLICT[1:],
+        )
+    ]
+
+    async def run():
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.3)
+
+            detail = str(app.query_one("#detail-kv", Static).content)
+
+            assert "Compatibility: 32% MISMATCH" in detail
+            assert "Conflict:" in detail
+            assert "media: Theatrical" in detail
+            assert "subtitle: Director's Cut" in detail
 
     asyncio.run(run())
 
@@ -1532,13 +1662,21 @@ def _preview_field(body: str, label: str) -> str:
     return ""
 
 
-PREVIEW_MATCH_REASONS = (
-    "movie/episode match",
-    "year match 1984",
-    "provider: SubDL (reliability 1/3)",
-    "source: BluRay",
-    "resolution: 1080p",
-    "release group match",
+# The tallest evidence block the engine can emit: a header, a title signal, one
+# signal per facet, and the hash signal. Building the modal from the maximum is
+# what makes the clip guard below meaningful rather than a lucky fit.
+PREVIEW_EVIDENCE = (
+    "Evidence:",
+    "+ exact title",
+    "+ year 1984",
+    "+ S01E03",
+    "+ Director's Cut",
+    "+ BluRay",
+    "+ 2160p",
+    "+ group GROUP",
+    "+ H.264",
+    "- edition unknown",
+    "- no hash match",
 )
 
 
@@ -1549,10 +1687,11 @@ def _preview_candidate() -> Candidate:
         release="Amadeus.1984.1080p.BluRay.x264-GROUP",
         language="ar",
         format="ass",
-        # The full reason list, which is what search._compose_reasons caps at, so
-        # the modal is given the tallest body it can ever be asked to render.
-        match_reasons=PREVIEW_MATCH_REASONS,
+        match_reasons=("release group match",),
         score=55,
+        compatibility=96,
+        compatibility_badge="BEST",
+        compatibility_evidence=PREVIEW_EVIDENCE,
     )
 
 
@@ -1569,7 +1708,7 @@ def _rendered_rows(svg: str) -> str:
     return "\n".join(rows).replace("\xa0", " ")
 
 
-def test_candidate_preview_shows_format_and_match_reasons(configured_app):
+def test_candidate_preview_shows_format_and_compatibility_evidence(configured_app):
     # The modal is a second renderer of the same candidate as the detail pane and
     # was missed when the Fmt column and match reasons landed.
     app, coordinator = configured_app
@@ -1586,15 +1725,19 @@ def test_candidate_preview_shows_format_and_match_reasons(configured_app):
             body = _preview_body(preview)
 
             assert _preview_field(body, "Format") == "ass"
-            assert _preview_field(body, "Reasons") == " · ".join(PREVIEW_MATCH_REASONS)
+            assert _preview_field(body, "Compatibility:") == "96% BEST"
+            # The modal and the detail pane read the same tuple, so the reasons the
+            # user is shown cannot disagree with the order the rows arrived in.
+            for line in PREVIEW_EVIDENCE:
+                assert line in body
 
     asyncio.run(run())
 
 
 def test_candidate_preview_renders_every_line_it_composes(configured_app):
-    # The tail of the wrapped reason string and the closing line are the first
-    # things a too-short container drops, and export_screenshot is the only view
-    # of what actually reached the screen.
+    # The tail of the evidence block and the closing line are the first things a
+    # too-short container drops, and export_screenshot is the only view of what
+    # actually reached the screen.
     app, coordinator = configured_app
     coordinator.candidates = [_preview_candidate()]
 
@@ -1606,7 +1749,7 @@ def test_candidate_preview_renders_every_line_it_composes(configured_app):
 
             rendered = _rendered_rows(app.export_screenshot())
 
-            assert "release group match" in rendered
+            assert "- no hash match" in rendered
             assert "esc or p to close" in rendered
 
     asyncio.run(run())

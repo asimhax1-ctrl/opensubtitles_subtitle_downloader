@@ -805,7 +805,10 @@ def test_results_and_multilingual_detail_are_visible(configured_app):
                 line for line in detail.splitlines() if "[dim]Hash match[/dim]" in line
             )
             assert hash_line.endswith("no")
-            assert detail.count("\n") <= 4
+            # Five budgeted lines: Uploader, Downloads, Match, Reasons, Hash match,
+            # Flags. The Reasons line is required by the Arabic Edition spec, so the
+            # guard moved from 4 to 5; it still catches unbounded growth.
+            assert detail.count("\n") <= 5
             assert str(app.query_one("#download-selected", Button).label) == "Get  ↵"
             assert str(app.query_one("#preview-selected", Button).label) == "View  p"
             assert str(app.query_one("#copy-url", Button).label) == "URL  y"
@@ -1413,5 +1416,96 @@ def test_fallback_candidates_are_shown_for_manual_choice(tmp_path):
             assert [item.key for item in app.candidates] == [english.key]
             assert app.notice == "No ar subtitles found. Showing en results."
             assert app.state.queue[0].status is QueueStatus.AWAITING_PICK
+
+    asyncio.run(run())
+
+
+def test_results_table_shows_a_format_column(configured_app):
+    app, coordinator = configured_app
+    coordinator.candidates = [
+        Candidate(
+            provider=Provider.SUBDL,
+            provider_id="arabic-ass",
+            release="الهيبة.S01E03.WEB-DL",
+            language="ar",
+            format="ass",
+            download_count=2400,
+            score=94,
+        )
+    ]
+
+    async def run():
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.3)
+
+            table = app.query_one(ResultsTable)
+            labels = [column.label.plain for column in table.columns.values()]
+            assert "Fmt" in labels
+            format_index = labels.index("Fmt")
+            assert table.get_cell_at((0, format_index)).strip() == "ass"
+            # The added column must not push the table into horizontal scroll.
+            assert table.max_scroll_x == 0
+
+    asyncio.run(run())
+
+
+def test_all_providers_mode_keeps_language_and_source_in_their_columns(configured_app):
+    # Regression: the row builder inserted the provider label at index 2, so the
+    # 2-wide "L" column rendered the provider name and "Source" rendered "AR".
+    app, coordinator = configured_app
+    coordinator.candidates = [
+        Candidate(
+            provider=Provider.SUBDL,
+            provider_id="english",
+            release="Al Hayba S01E03",
+            language="en",
+            download_count=10,
+            score=70,
+        )
+    ]
+    app.set_reactive(SubsApp.all_providers_mode, True)
+
+    async def run():
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.3)
+
+            table = app.query_one(ResultsTable)
+            # Columns are # Release L Source Fmt Flags D/L Match in this mode.
+            assert str(table.get_cell_at((0, 2))) == "EN"
+            # The provider cell carries deliberate leading padding for the Source
+            # column, so it is compared stripped.
+            assert str(table.get_cell_at((0, 3))).strip() == "SubDL"
+            assert table.max_scroll_x == 0
+
+    asyncio.run(run())
+
+
+def test_detail_pane_shows_format_and_match_reasons(configured_app):
+    app, coordinator = configured_app
+    coordinator.candidates = [
+        Candidate(
+            provider=Provider.SUBDL,
+            provider_id="arabic-ass",
+            release="الهيبة.S01E03.WEB-DL",
+            language="ar",
+            format="ass",
+            match_reasons=(
+                "movie/episode match",
+                "provider: SubDL (reliability 1/3)",
+            ),
+            score=94,
+        )
+    ]
+
+    async def run():
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.3)
+
+            provider_line = str(app.query_one("#detail-provider", Static).content)
+            detail = str(app.query_one("#detail-kv", Static).content)
+
+            assert "ass" in provider_line
+            assert "movie/episode match" in detail
+            assert "provider: SubDL (reliability 1/3)" in detail
 
     asyncio.run(run())

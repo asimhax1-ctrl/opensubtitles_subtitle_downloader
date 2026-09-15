@@ -41,13 +41,17 @@ class DetailPane(VerticalScroll):
             copy.disabled = True
             return
         title.update(candidate.release or "(unnamed release)")
+        format_suffix = f" · {candidate.format}" if candidate.format else ""
         provider.update(
             f"[b]{candidate.provider.label}[/b] · {candidate.language.upper()}"
+            f"{format_suffix}"
         )
         detail.update(
             f"[dim]Uploader[/dim]   {candidate.author or '—'}\n"
             f"[dim]Downloads[/dim]  {candidate.download_count:,}\n"
             f"[dim]Match[/dim]      [yellow]{candidate.score:.0f}[/yellow]\n"
+            f"[dim]Reasons[/dim]    "
+            f"{' · '.join(candidate.match_reasons) or '—'}\n"
             f"[dim]Hash match[/dim] "
             f"{'[green]yes · exact file[/green]' if candidate.hash_match else 'no'}\n"
             f"[dim]Flags[/dim]      "

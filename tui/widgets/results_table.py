@@ -31,6 +31,7 @@ class ResultsTable(DataTable):
             (
                 candidate.key,
                 candidate.release,
+                candidate.format,
                 candidate.language,
                 candidate.provider,
                 candidate.hash_match,
@@ -57,12 +58,16 @@ class ResultsTable(DataTable):
                 str(index),
                 candidate.release,
                 candidate.language.upper(),
+                candidate.format or "",
                 Text.from_markup(" ".join(flags)),
                 _count(candidate.download_count),
                 _score(candidate.score),
             ]
             if app.all_providers_mode:
-                cells.insert(2, f" {candidate.provider.label}")
+                # Index 3, not 2: the columns are declared # Release L Source Fmt ...
+                # so inserting at 2 put the provider label under "L" and the language
+                # code under "Source".
+                cells.insert(3, f" {candidate.provider.label}")
             self.add_row(*cells, key=candidate.key)
         self._rendered_signature = signature
         if self.row_count:
@@ -97,14 +102,23 @@ class ResultsTable(DataTable):
         self._number_buffer_timer = None
 
     def _set_columns(self, all_providers_mode: bool) -> None:
-        self.add_column("#", width=4)
+        # Column widths are a budget, not a preference: #results-panel is 18fr against
+        # DetailPane's 7fr (tui/style.tcss:495, :539), and at WIDE_LAYOUT_MIN_WIDTH=140
+        # the table has 93 usable columns -- measured, not estimated: 93 fits with no
+        # horizontal scroll and 94 scrolls by exactly one. "#" is 2 rather than 3
+        # because rung 1 of the width ladder pays for the new column there, and it
+        # loses nothing below 100 rows; Flags at 4 would clip "HI AI" and Release
+        # cannot go below 71 (test_app.py asserts it). D/L must stay 5 (it renders
+        # "48.2k") and Match must stay 4 (it renders " 100").
+        self.add_column("#", width=2)
         self.add_column("Release", width=62 if all_providers_mode else 71)
         self.add_column("L", width=2)
         if all_providers_mode:
             self.add_column("Source", width=9)
-        self.add_column("Flags", width=6)
+        self.add_column("Fmt", width=4)
+        self.add_column("Flags", width=5)
         self.add_column("D/L", width=5)
-        self.add_column("Match", width=5)
+        self.add_column("Match", width=4)
         self._rendered_all_providers_mode = all_providers_mode
 
 

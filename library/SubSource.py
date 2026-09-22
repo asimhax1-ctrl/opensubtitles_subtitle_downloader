@@ -542,8 +542,9 @@ class SubSource:
     ):
         """Stream a SubSource download (zip or rar) and extract the best match.
 
-        SubSource always returns an archive; we extract every subtitle file in it
-        and pick the season/episode match for TV (or the first for a movie).
+        SubSource always returns an archive; only the selected subtitle member
+        is written beside the media. TV picks the season/episode match (or
+        nothing when no member matches); a movie takes the first member.
         """
         subtitle_id = subtitle.get("id")
         abs_url = self._download_url_for(subtitle_id)
@@ -613,7 +614,7 @@ class SubSource:
                 decoded_content = self._decode_bytes(archive.read(sf))
 
                 ext = Path(sf).suffix.lower()
-                if ext not in (".ass", ".ssa", ".srt", ".vtt"):
+                if ext not in (".ass", ".ssa", ".srt", ".vtt", ".sub"):
                     ext = ".srt"
                 target_filename = (
                     f"{video_input_path.stem}.{language_choice}{ext}"

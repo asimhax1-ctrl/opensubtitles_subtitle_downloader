@@ -341,7 +341,7 @@ class SubDL:
         abs_url = self._download_url(rel_url)
         response = requests.get(abs_url, timeout=10)
         response.raise_for_status()
-        ext = f".{fmt}" if fmt in ("srt", "ass", "ssa", "vtt") else ".srt"
+        ext = f".{fmt}" if fmt in ("srt", "ass", "ssa", "vtt", "sub") else ".srt"
         target_filename = self._target_subtitle_name(
             video_input_path, language_choice, ext
         )
@@ -388,22 +388,28 @@ class SubDL:
         try:
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 extracted_files = zip_ref.namelist()
-                ass_files = [f for f in extracted_files if f.endswith(".ass")]
-                ssa_files = [f for f in extracted_files if f.endswith(".ssa")]
-                srt_files = [f for f in extracted_files if f.endswith(".srt")]
+                lowered = {name: name.lower() for name in extracted_files}
+                ass_files = [f for f in extracted_files if lowered[f].endswith(".ass")]
+                ssa_files = [f for f in extracted_files if lowered[f].endswith(".ssa")]
+                srt_files = [f for f in extracted_files if lowered[f].endswith(".srt")]
+                sub_files = [f for f in extracted_files if lowered[f].endswith(".sub")]
 
-                if not ass_files and not ssa_files and not srt_files:
+                if not ass_files and not ssa_files and not srt_files and not sub_files:
                     self.console.print(
-                        "[bold red]Error: No .ass, .ssa, or .srt subtitle files "
-                        "found in the archive.[/]"
+                        "[bold red]Error: No .ass, .ssa, .srt, or .sub subtitle "
+                        "files found in the archive.[/]"
                     )
                     return None
 
                 if is_movie:
-                    matching_subtitle = (ass_files + ssa_files + srt_files)[0]
+                    matching_subtitle = (
+                        ass_files + ssa_files + srt_files + sub_files
+                    )[0]
                 else:
                     matching_subtitle = None
-                    for subtitle_file in ass_files + ssa_files + srt_files:
+                    for subtitle_file in (
+                        ass_files + ssa_files + srt_files + sub_files
+                    ):
                         sub_season, sub_episode = (
                             self.subtitle_utils.extract_season_and_episode(
                                 subtitle_file
@@ -426,7 +432,7 @@ class SubDL:
                     target_filename = self._target_subtitle_name(
                         video_input_path,
                         language_choice,
-                        Path(subtitle_file).suffix,
+                        Path(subtitle_file).suffix.lower(),
                     )
                     selected_subtitle_path = self._output_path(
                         video_input_path,

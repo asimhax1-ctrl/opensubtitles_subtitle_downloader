@@ -350,6 +350,64 @@ def test_subsource_preserves_ssa_and_vtt_extensions(tmp_path, monkeypatch):
     assert Path(result).read_bytes() in (b"ssa content", b"vtt content")
 
 
+def test_subdl_zip_preserves_a_sub_format_member(tmp_path, monkeypatch):
+    """A MicroDVD (.sub) pack member must keep its extension, not become .srt."""
+    import library.SubDL as subdl_module
+
+    client = object.__new__(subdl_module.SubDL)
+    client.output_directory = None
+    client.console = QuietConsole()
+    client.subtitle_utils = SubtitleUtils()
+    client.download_base_url = "https://example.test"
+
+    video = tmp_path / "Show.S01E02.1080p.mkv"
+    video.write_bytes(b"x")
+
+    archive_bytes = _build_zip(
+        ("Show.S01E01.srt", b"episode one"),
+        ("Show.S01E02.SUB", b"{1}{1}two"),
+    )
+    monkeypatch.setattr(
+        subdl_module.requests, "get", lambda *a, **k: FakeZipResponse(archive_bytes)
+    )
+
+    result = subdl_module.SubDL._download_zip(
+        client,
+        "https://example.test/pack.zip",
+        video,
+        "en",
+        1,
+        2,
+        False,
+    )
+
+    assert result is not None
+    assert result.suffix == ".sub"
+    assert result.read_text(encoding="utf-8") == "{1}{1}two"
+
+
+def test_subsource_archive_preserves_a_sub_format_member(tmp_path, monkeypatch):
+    """A MicroDVD (.sub) archive member must keep its extension, not .srt."""
+    client = object.__new__(SubSource)
+    client.api_key = "key"
+    client.api_base_url = "https://api.subsource.net/api/v1"
+    client.subtitle_utils = SubtitleUtils()
+    client.console = QuietConsole()
+    client.output_directory = None
+
+    video = tmp_path / "Movie.2024.1080p.mkv"
+    video.write_bytes(b"x")
+
+    archive_bytes = _build_zip(("Movie.2024.1080p.sub", b"{1}{1}sub content"))
+    monkeypatch.setattr(client, "_get_raw", lambda _url: FakeZipResponse(archive_bytes))
+
+    result = client.download_single_subtitle({"id": "123"}, video, "ar")
+
+    assert result is not None
+    assert Path(result).suffix == ".sub"
+    assert Path(result).read_bytes() == b"{1}{1}sub content"
+
+
 def test_subdl_zip_extracts_only_the_requested_episode(tmp_path, monkeypatch):
     """A season pack must not dump every episode beside the media."""
     import library.SubDL as subdl_module

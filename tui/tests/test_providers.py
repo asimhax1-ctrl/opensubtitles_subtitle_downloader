@@ -159,6 +159,39 @@ def test_subsource_adapter_normalizes_language_to_code():
     assert result.candidates[0].language == "en"
 
 
+def test_extract_subdl_subtitle_id_accepts_relative_and_absolute_urls():
+    utils = SubtitleUtils()
+
+    assert (
+        utils.extract_subdl_subtitle_id("/subtitle/3158195-3172856.zip")
+        == "3158195-3172856"
+    )
+    assert (
+        utils.extract_subdl_subtitle_id("/subtitle/3158195-3172856.zip?api_key=secret")
+        == "3158195-3172856"
+    )
+    assert (
+        utils.extract_subdl_subtitle_id(
+            "https://dl.subdl.com/subtitle/3158195-3172856.zip"
+        )
+        == "3158195-3172856"
+    )
+    assert (
+        utils.extract_subdl_subtitle_id(
+            "https://dl.subdl.com/subtitle/3158195-3172856.zip?api_key=secret"
+        )
+        == "3158195-3172856"
+    )
+
+
+def test_extract_subdl_subtitle_id_rejects_empty_urls():
+    utils = SubtitleUtils()
+
+    assert utils.extract_subdl_subtitle_id(None) is None
+    assert utils.extract_subdl_subtitle_id("") is None
+    assert utils.extract_subdl_subtitle_id("/subtitle/") is None
+
+
 def test_provider_error_is_distinct_from_zero_results():
     failed = OpenSubtitlesAdapter(client=FailingClient()).search(REQUEST)
     empty = OpenSubtitlesAdapter(client=FakeClient([])).search(REQUEST)

@@ -149,8 +149,16 @@ class SubtitleUtils:
             return None
         # v1: '/subtitle/3158195-3172856.zip'
         # v2: '/subtitle/3158195-3172856.zip?api_key=...'  (strip the query first)
+        # Absolute download URLs ('https://dl.subdl.com/subtitle/...') carry the
+        # same path: the id is the segment after 'subtitle', not parts[2] (which
+        # is the host for absolute URLs).
         url = url.split("?")[0]
-        parts = url.split("/")
+        parts = [part for part in url.split("/") if part]
+        if "subtitle" in parts:
+            following = parts[parts.index("subtitle") + 1 :]
+            if following and following[0]:
+                return following[0].replace(".zip", "")
+            return None
         # 'and parts[2]' makes '/subtitle/' (empty id segment) return None, not ''
         if len(parts) >= 3 and parts[2]:
             return parts[2].replace(".zip", "")

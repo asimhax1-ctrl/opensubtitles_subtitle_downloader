@@ -170,6 +170,7 @@ NOISE_WORDS = frozenset(
         "limited",
         "multi",
         "proper",
+        "remux",
         "repack",
         "sdr",
         "season",

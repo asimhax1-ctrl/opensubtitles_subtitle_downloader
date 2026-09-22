@@ -179,6 +179,23 @@ def test_same_film_with_different_audio_lines_still_gets_exact_title():
     assert subtitle_facets.codec == "H.264"
 
 
+def test_a_remux_tag_is_not_part_of_the_title():
+    # REMUX describes how the release was sourced, not which film it is: a
+    # remux of the same film must reach the exact-title path, and the source
+    # facet must still read the BluRay it was remuxed from.
+    media = "Amadeus.1984.1080p.BluRay.x264-GRP"
+    subtitle = "Amadeus.1984.1080p.BluRay.REMUX.AVC-GRP"
+
+    subtitle_facets = parse_release_facets(subtitle)
+    match = compatibility(subtitle, media)
+
+    assert subtitle_facets.title == "amadeus"
+    assert subtitle_facets.source == "BluRay"
+    assert "+ exact title" in match.evidence_lines()
+    untagged = compatibility("Amadeus.1984.1080p.BluRay.AVC-GRP", media)
+    assert match.percent == untagged.percent
+
+
 def test_a_partial_title_outranks_an_unrelated_one():
     partial = compatibility("Amadeus and Salieri (1984) 1080p BluRay", MOVIE_MEDIA)
     unrelated = compatibility("Salieri (1984) 1080p BluRay", MOVIE_MEDIA)

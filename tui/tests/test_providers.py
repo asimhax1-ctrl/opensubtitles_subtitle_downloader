@@ -844,6 +844,34 @@ def test_get_alternate_names_handles_a_season_less_episode_with_a_year():
     assert any("E03" in name and "2020" in name for name in names)
 
 
+def test_get_alternate_names_drops_audio_lines_and_group_from_movie_queries():
+    # Compound audio tokens ("DDP5.1") fragment into junk ("ddp5", "1") and the
+    # release group survives hypothesis extraction, so every provider query for
+    # such a film carries noise. The variants must be the bare title (+ year).
+    names = SubtitleUtils().get_alternate_names(
+        "Dune.Part.Two.2024.2160p.WEB-DL.DDP5.1-GRP"
+    )
+
+    assert names
+    assert all("None" not in name for name in names)
+    for junk in ("ddp5", "ddp", "2160p", "web", "grp"):
+        assert all(junk not in name.split() for name in names), names
+    assert names[0] == "dune part two"
+    assert any(name == "dune part two 2024" for name in names)
+
+
+def test_title_hypotheses_keep_dash_separated_title_words():
+    # Group stripping must only remove the trailing release group: "Man" in
+    # "Spider-Man" follows a hyphen but is preceded by a title word, not a
+    # technical token.
+    hypotheses = SubtitleUtils._title_hypotheses(
+        "Spider-Man.2002.1080p.BluRay.x264-GRP"
+    )
+
+    assert hypotheses
+    assert hypotheses[0] == "spider man"
+
+
 def test_arabic_variant_is_additive_and_folded():
     # The trailing teh marbuta (U+0629) folds to heh (U+0647), so the folded
     # spelling is a genuinely different query string from the one on the filename.

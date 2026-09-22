@@ -121,6 +121,63 @@ SOURCE_PATTERNS = (
 RESOLUTION_RE = re.compile(r"\b(\d{3,4}p|4k)\b", re.IGNORECASE)
 YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
+# Compound audio/codec/hdr tokens that survive word-splitting as fragments
+# unless collapsed first ("DDP5.1" would become "ddp5" + "1"). Order matters:
+# longer, more specific patterns precede shorter ones (HDR10Plus before HDR10).
+# Single source of truth for the compatibility engine
+# (library/compatibility.py) and the query-side title hypotheses below, so the
+# ranker and the provider queries can never disagree on what is technical.
+RELEASE_TOKEN_NORMALIZATIONS = (
+    # Audio lines: match the codec abbreviation plus optional channel count,
+    # but stop before the separator that belongs to the next token so the
+    # replacement does not swallow it (e.g. "AAC2.0.H.264" -> "aac.h264").
+    (r"ddp\+?\d*(?:\.\d+)?", "ddp"),
+    (r"dd\+?\d*(?:\.\d+)?", "dd"),
+    (r"eac3", "eac3"),
+    (r"ac3", "ac3"),
+    (r"aac\d*(?:\.\d+)?", "aac"),
+    (r"dts[.\s-]*hd[.\s-]*ma(?:\d+(?:\.\d+)?)?", "dtshdma"),
+    (r"dts\d*(?:\.\d+)?", "dts"),
+    (r"truehd", "truehd"),
+    (r"atmos", "atmos"),
+    (r"hdr10(?:plus|\+)?", "hdr10"),
+    (r"h\.264", "h264"),
+    (r"h\.265", "h265"),
+)
+
+RELEASE_SOURCE_TOKENS = frozenset(token for token, _ in SOURCE_PATTERNS)
+
+TRAILING_RELEASE_WORD_RE = re.compile(r"[0-9A-Za-z]+$")
+
+
+def collapse_release_technical_tokens(text):
+    """Collapse compound technical phrases into single canonical tokens.
+
+    Without this, "DDP5.1" fragments into "ddp5", "1" and the title keeps the
+    audio-line junk; "H.264" fragments into "h", "264" and the codec is lost.
+    Case is preserved so the release group keeps its original spelling.
+    """
+    normalized = str(text or "")
+    for pattern, replacement in RELEASE_TOKEN_NORMALIZATIONS:
+        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+    return normalized
+
+
+def release_group_of(text):
+    """The release group, which is the token after the last hyphen.
+
+    A hyphenated source ("WEB-DL") also ends in a hyphenated token, so the text
+    before the hyphen is checked against the known sources first: otherwise the
+    source would be read as the group and left unknown.
+    """
+    head, separator, tail = str(text or "").rpartition("-")
+    if not separator or not tail.isalnum() or not head or head[-1].isspace():
+        return None
+    previous = TRAILING_RELEASE_WORD_RE.search(head)
+    if previous and f"{previous.group(0)}-{tail}".lower() in RELEASE_SOURCE_TOKENS:
+        return None
+    return tail
+
 
 @dataclass(frozen=True)
 class MatchExplanation:
@@ -504,6 +561,15 @@ class SubtitleUtils:
         text = unicodedata.normalize("NFKC", str(media_name))
         text = re.sub(r"[\u2010-\u2015\u2212]", "-", text)
         text = re.sub(r"^\s*(?:\[[^\]]+\]\s*)+", "", text)
+        # Collapse compound technical phrases before anything is split, so the
+        # scorer and the provider queries share one reading of the name; then
+        # drop the release group, which is never part of the title.
+        text = collapse_release_technical_tokens(text)
+        group = release_group_of(text)
+        if group:
+            head, separator, tail = text.rpartition("-")
+            if separator and tail == group:
+                text = head
         boundaries = (
             r"\b[Ss]\d{1,2}[\s._-]*[Ee](?:[Pp])?[\s._-]*\d{1,3}\b",
             r"\b\d{1,2}[xX]\d{1,3}\b",
@@ -535,20 +601,26 @@ class SubtitleUtils:
             "atmos",
             "avc",
             "bluray",
+            "dd",
             "ddp",
             "dl",
             "dts",
+            "dtshdma",
             "dvd",
+            "dv",
             "eac3",
             "flac",
             "h264",
             "h265",
+            "hdr10",
+            "hdr10plus",
             "hdtv",
             "hdrip",
             "hevc",
             "netflix",
             "proper",
             "remux",
+            "truehd",
             "webrip",
             "web",
             "webdl",

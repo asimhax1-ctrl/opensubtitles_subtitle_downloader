@@ -32,11 +32,14 @@ from thefuzz import fuzz
 from library.subtitle_utils import (
     APOSTROPHE_RE,
     KEEP_MATCH_CHARS_RE,
+    RELEASE_SOURCE_TOKENS,
     RESOLUTION_RE,
     SOURCE_PATTERNS,
     YEAR_RE,
     SubtitleUtils,
+    collapse_release_technical_tokens,
     fold_arabic,
+    release_group_of,
 )
 
 # What each facet of an ideal complete match is worth. The sum is the
@@ -116,7 +119,7 @@ BADGE_BANDS = (
 # subtitle_utils.SOURCE_PATTERNS, whose order decides explain_subtitle_match's
 # locked scores.
 SOURCE_LABELS = SOURCE_PATTERNS + (("dvdrip", "DVDRip"),)
-SOURCE_TOKENS = frozenset(token for token, _ in SOURCE_LABELS)
+SOURCE_TOKENS = RELEASE_SOURCE_TOKENS | {"dvdrip"}
 
 # Ordered most specific first, and the first rule that matches wins on both sides
 # of a comparison, so a name stating two of them still names one edition.
@@ -199,7 +202,6 @@ MEDIA_EXTENSION_RE = re.compile(
     r"\.(?:mkv|mp4|avi|mov|m4v|ts|webm|srt|ass|ssa|vtt|sub|zip)$",
     re.IGNORECASE,
 )
-TRAILING_WORD_RE = re.compile(r"[0-9A-Za-z]+$")
 
 # Every word that every facet detector can consume, so the title keeps only what
 # is left. Built from the tables above rather than listed again, because a
@@ -398,45 +400,10 @@ def compatibility_badge(percent: int) -> str:
     return MISMATCH_BADGE
 
 
-# Compound audio/codec/hdr tokens that survive `_words` as fragments unless
-# they are collapsed to single canonical tokens first. Order matters: longer,
-# more specific patterns must precede shorter ones (e.g. HDR10Plus before HDR10).
-_RELEASE_TOKEN_NORMALIZATIONS = (
-    # Audio lines: match the codec abbreviation plus optional channel count,
-    # but stop before the separator that belongs to the next token so the
-    # replacement does not swallow it (e.g. "AAC2.0.H.264" -> "aac.h264").
-    (r"ddp\+?\d*(?:\.\d+)?", "ddp"),
-    (r"dd\+?\d*(?:\.\d+)?", "dd"),
-    (r"eac3", "eac3"),
-    (r"ac3", "ac3"),
-    (r"aac\d*(?:\.\d+)?", "aac"),
-    (r"dts[.\s-]*hd[.\s-]*ma(?:\d+(?:\.\d+)?)?", "dtshdma"),
-    (r"dts\d*(?:\.\d+)?", "dts"),
-    (r"truehd", "truehd"),
-    (r"atmos", "atmos"),
-    (r"hdr10(?:plus|\+)?", "hdr10"),
-    (r"h\.264", "h264"),
-    (r"h\.265", "h265"),
-)
-
-
-def _normalize_release_text(text: str) -> str:
-    """Collapse compound technical phrases into single canonical tokens.
-
-    Without this, "DDP5.1" fragments into "ddp5", "1" and the title keeps the
-    audio-line junk; "H.264" fragments into "h", "264" and the codec is lost.
-    Case is preserved so the release group keeps its original spelling.
-    """
-    normalized = str(text or "")
-    for pattern, replacement in _RELEASE_TOKEN_NORMALIZATIONS:
-        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
-    return normalized
-
-
 def parse_release_facets(name: object) -> ReleaseFacets:
     """Read every facet a release name states. States nothing it cannot read."""
     text = MEDIA_EXTENSION_RE.sub("", str(name or "").strip())
-    text = _normalize_release_text(text)
+    text = collapse_release_technical_tokens(text)
     words = _words(text)
     year_text = _year_of(text)
     year = int(year_text) if year_text else None
@@ -876,10 +843,6 @@ def _group_of(text: str) -> str | None:
     before the hyphen is checked against the known sources first: otherwise the
     source would be read as the group and left unknown.
     """
-    head, separator, tail = str(text or "").rpartition("-")
-    if not separator or not tail.isalnum() or not head or head[-1].isspace():
-        return None
-    previous = TRAILING_WORD_RE.search(head)
-    if previous and f"{previous.group(0)}-{tail}".lower() in SOURCE_TOKENS:
-        return None
-    return tail
+    # Shared with the query-side title hypotheses in subtitle_utils so the
+    # ranker and the provider queries agree on where the title ends.
+    return release_group_of(text)

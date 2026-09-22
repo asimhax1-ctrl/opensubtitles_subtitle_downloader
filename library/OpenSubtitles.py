@@ -1,6 +1,5 @@
 # Handles subtitle search and download through the OpenSubtitles API.
 import json
-import re
 import time
 from pathlib import Path
 
@@ -247,7 +246,7 @@ class OpenSubtitles:
             raise RuntimeError(
                 "OpenSubtitles result has no usable file_id "
                 f"({type(e).__name__}: {e}); try the next candidate"
-            )
+            ) from e
         payload = {"file_id": file_id}
         try:
             response = requests.post(
@@ -287,26 +286,26 @@ class OpenSubtitles:
                 raise RuntimeError(
                     "OpenSubtitles authentication failed (401). Check the "
                     f"username/password/API key{detail}"
-                )
+                ) from e
             if status == 403:
                 raise RuntimeError(
                     "OpenSubtitles refused the download (403). The account "
                     f"may lack download rights{detail}"
-                )
+                ) from e
             if status == 429:
                 raise RuntimeError(
                     "OpenSubtitles download limit reached (429). Daily quota "
                     "is exhausted — try again tomorrow or use SubDL/SubSource"
                     f"{detail}"
-                )
+                ) from e
             raise RuntimeError(
                 f"OpenSubtitles download request failed ({status}){detail}"
-            )
+            ) from e
         except requests.exceptions.RequestException as e:
             self.console.print(
                 f"[bold red]Error during OpenSubtitles download link retrieval: {e}[/]"
             )
-            raise RuntimeError(f"OpenSubtitles download request failed: {e}")
+            raise RuntimeError(f"OpenSubtitles download request failed: {e}") from e
         except (KeyError, json.decoder.JSONDecodeError, TypeError, IndexError) as e:
             self.console.print(
                 f"[bold red]Error parsing OpenSubtitles download link response: {e}[/]"
@@ -314,14 +313,14 @@ class OpenSubtitles:
             raise RuntimeError(
                 "OpenSubtitles returned an unreadable download response "
                 f"({type(e).__name__}); try the next candidate"
-            )
+            ) from e
         except RuntimeError:
             raise
         except Exception as e:
             self.console.print(
                 f"[bold red]Unexpected error during download link retrieval: {e}[/]"
             )
-            raise RuntimeError(f"OpenSubtitles download failed: {e}")
+            raise RuntimeError(f"OpenSubtitles download failed: {e}") from e
 
     def save_subtitle(self, url, path):
         """Download and save subtitle file from url to path"""

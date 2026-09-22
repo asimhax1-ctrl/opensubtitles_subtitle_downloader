@@ -1,5 +1,4 @@
 # SubDL.py is a class that handles subtitle search and download from SubDL API.
-import re
 import time
 import zipfile
 from dataclasses import dataclass

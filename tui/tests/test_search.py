@@ -571,7 +571,7 @@ def test_scorer_without_explain_subtitle_match_scores_with_empty_reasons():
 def test_search_module_and_library_agree_on_the_reason_cap():
     from library.subtitle_utils import MAX_MATCH_REASONS as library_cap
 
-    assert MAX_MATCH_REASONS == library_cap
+    assert library_cap == MAX_MATCH_REASONS
 
 
 # --- English fallback -----------------------------------------------------

@@ -2,9 +2,7 @@
 
 from pathlib import Path
 
-import pytest
-
-from library.subtitle_verifier import SubtitleVerifier, VerificationResult
+from library.subtitle_verifier import SubtitleVerifier
 
 
 def _write(path: Path, text: str) -> None:

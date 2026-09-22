@@ -102,8 +102,9 @@ def test_sync_subs_audio_finds_canonical_launcher_beside_python(
 
 
 def test_iter_process_output_splits_carriage_return_progress():
-    from library.sync_subtitles import _iter_process_output
     import io
+
+    from library.sync_subtitles import _iter_process_output
 
     stream = io.StringIO(
         "line one\r 10%...\r 45%...\r\nfinal\rpartial-no-newline"

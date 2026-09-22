@@ -560,13 +560,6 @@ class SubSource:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
 
-            if language_choice:
-                subtitle_filename = f"{video_input_path.stem}.{language_choice}.ass"
-                fallback_filename = f"{video_input_path.stem}.{language_choice}.srt"
-            else:
-                subtitle_filename = f"{video_input_path.stem}.ass"
-                fallback_filename = f"{video_input_path.stem}.srt"
-
             if not is_movie and (video_season is None or video_episode is None):
                 self.console.print(
                     "[bold red]Error: Could not extract season/episode "

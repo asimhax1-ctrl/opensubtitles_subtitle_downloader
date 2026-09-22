@@ -6,13 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from library.subtitle_verifier import SubtitleVerifier
 from tui.config import ApplicationConfig
 from tui.domain import EngineMode, Provider, SearchRequest, should_try_next_candidate
 from tui.jobs import JobCoordinator
 from tui.providers.base import ProviderAdapter
 from tui.search import SearchCoordinator
-
-from library.subtitle_verifier import SubtitleVerifier
 
 # The configuration key that turns automatic fallback download on. Defined once so the
 # emitted guidance and the configuration surface cannot drift apart.
@@ -104,7 +103,11 @@ class HeadlessAllProvidersRunner:
                 if not result.candidates:
                     self.emit(f"Error: No subtitles found for {media}.")
                     continue
-                if result.used_fallback and not self.config.general.auto_fallback_download:
+                fallback_only = (
+                    result.used_fallback
+                    and not self.config.general.auto_fallback_download
+                )
+                if fallback_only:
                     # No human is present to choose, and silently downloading a
                     # language the user did not ask for is worse than downloading
                     # nothing.

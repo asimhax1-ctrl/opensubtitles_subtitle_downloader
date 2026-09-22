@@ -39,7 +39,9 @@ def _launcher_text() -> str:
     return LAUNCHER.read_text(encoding="ascii")
 
 
-def _run_launcher(tmp_path: Path, *arguments: str) -> tuple[subprocess.CompletedProcess, list[str]]:
+def _run_launcher(
+    tmp_path: Path, *arguments: str
+) -> tuple[subprocess.CompletedProcess, list[str]]:
     """Run the real launcher through cmd.exe against the stub app.
 
     The batch file locates the app relative to itself, so copying both into a
@@ -51,7 +53,12 @@ def _run_launcher(tmp_path: Path, *arguments: str) -> tuple[subprocess.Completed
     (tmp_path / "download_subs.py").write_text(STUB_APP, encoding="utf-8")
 
     completed = subprocess.run(
-        [os.environ.get("COMSPEC", "cmd"), "/c", str(tmp_path / "ARABIC_SUBS.bat"), *arguments],
+        [
+            os.environ.get("COMSPEC", "cmd"),
+            "/c",
+            str(tmp_path / "ARABIC_SUBS.bat"),
+            *arguments,
+        ],
         cwd=tmp_path,
         capture_output=True,
     )

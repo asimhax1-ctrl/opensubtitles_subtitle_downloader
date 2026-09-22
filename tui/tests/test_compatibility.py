@@ -26,7 +26,9 @@ EPISODE_MEDIA = "The.Pitt.S01E03.1080p.WEB-DL.x264-GROUP"
 
 
 def test_a_release_name_yields_every_facet_it_states():
-    facets = parse_release_facets("Amadeus (1984) Directors Cut 2160p BluRay x265-GROUP")
+    facets = parse_release_facets(
+        "Amadeus (1984) Directors Cut 2160p BluRay x265-GROUP"
+    )
 
     assert facets.title == "amadeus"
     assert facets.year == 1984

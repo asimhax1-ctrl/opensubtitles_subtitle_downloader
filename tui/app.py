@@ -29,6 +29,7 @@ from textual.widgets import (
     Switch,
 )
 
+from library.subtitle_verifier import SubtitleVerifier
 from tui.config import (
     ApplicationConfig,
     ConfigDiff,
@@ -49,7 +50,6 @@ from tui.domain import (
     should_try_next_candidate,
 )
 from tui.jobs import JobCoordinator
-from library.subtitle_verifier import SubtitleVerifier
 from tui.keymap import Action, Keymap
 from tui.media import expand_media_paths, resolve_media_extensions
 from tui.providers import create_adapters

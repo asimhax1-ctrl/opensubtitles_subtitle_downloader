@@ -10,15 +10,15 @@ from typing import Any
 
 from charset_normalizer import from_bytes
 
+from library.subtitle_verifier import SubtitleVerifier
 from tui.domain import (
+    SUBTITLE_FORMATS,
     Candidate,
     DownloadResult,
     PostProcessResult,
     Provider,
-    SUBTITLE_FORMATS,
     normalize_subtitle_format,
 )
-from library.subtitle_verifier import SubtitleVerifier
 from tui.providers.base import ProviderAdapter
 
 # SSA-specific marker first: SSA files also carry "[Script Info]", so testing the
@@ -189,9 +189,9 @@ class JobCoordinator:
                     error="Provider wrote outside the download staging directory",
                 )
 
-            detected = normalize_subtitle_format(candidate.format) or sniff_subtitle_format(
-                staged_path
-            )
+            detected = normalize_subtitle_format(
+                candidate.format
+            ) or sniff_subtitle_format(staged_path)
             language_suffix = f".{candidate.language}" if candidate.language else ""
             desired_name = f"{media.stem}{language_suffix}.{detected}"
             if staged_path.name != desired_name:

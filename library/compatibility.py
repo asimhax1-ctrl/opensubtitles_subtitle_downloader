@@ -777,7 +777,7 @@ def _episode_of(text: str) -> tuple[int | None, int | None]:
 
 
 def _edition_of(words: list[str], *, text: str = "") -> str | None:
-    pairs = set(zip(words, words[1:]))
+    pairs = set(zip(words, words[1:], strict=False))
     lowered = str(text or "").lower()
     for tokens, label in EDITION_RULES:
         if len(tokens) == 2:

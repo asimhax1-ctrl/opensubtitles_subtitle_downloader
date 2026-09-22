@@ -15,7 +15,7 @@ from tui.config import (
     GeneralConfig,
     ProviderConfig,
 )
-from tui.domain import HealthResult, Provider, SearchRequest, normalize_subtitle_format
+from tui.domain import Provider, SearchRequest, normalize_subtitle_format
 from tui.providers.base import candidate_from_standardized, public_url
 from tui.providers.factory import create_adapters
 from tui.providers.opensubtitles import OpenSubtitlesAdapter
@@ -1179,7 +1179,9 @@ def test_subdl_zip_extracts_an_ssa_member_as_ssa(tmp_path, monkeypatch):
         def iter_content(self, chunk_size=8192):
             return [payload]
 
-    monkeypatch.setattr(subdl_module.requests, "get", lambda *a, **k: StreamingResponse())
+    monkeypatch.setattr(
+        subdl_module.requests, "get", lambda *a, **k: StreamingResponse()
+    )
     client = object.__new__(subdl_module.SubDL)
     client.output_directory = None
     client.console = _SilentConsole()
@@ -1217,7 +1219,9 @@ def test_subdl_zip_extracts_an_srt_member_as_srt(tmp_path, monkeypatch):
         def iter_content(self, chunk_size=8192):
             return [payload]
 
-    monkeypatch.setattr(subdl_module.requests, "get", lambda *a, **k: StreamingResponse())
+    monkeypatch.setattr(
+        subdl_module.requests, "get", lambda *a, **k: StreamingResponse()
+    )
     client = object.__new__(subdl_module.SubDL)
     client.output_directory = None
     client.console = _SilentConsole()

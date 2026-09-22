@@ -97,7 +97,8 @@ def sync_subs_audio(
         executable,
         f"{media_path}",  # path to the video
         "-i",
-        f"{subtitle_path}",  # the subtitle for input, using the same name as the film + .srt
+        # the subtitle for input, using the same name as the film + .srt
+        f"{subtitle_path}",
         "-o",
         f"{subtitle_path}",  # the output replaces the original subtitle
         "--encoding",

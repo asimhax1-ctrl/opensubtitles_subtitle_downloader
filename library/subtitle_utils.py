@@ -431,7 +431,8 @@ class SubtitleUtils:
 
                 if filesize < 65536 * 2:
                     self.console.print(
-                        f"[bold red]Error: File size error while generating hash for {media_path}[/]"
+                        "[bold red]Error: File size error while generating "
+                        f"hash for {media_path}[/]"
                     )
                     return None
 
@@ -445,12 +446,13 @@ class SubtitleUtils:
                 filehash += sum(longlongs)
                 filehash &= 0xFFFFFFFFFFFFFFFF
 
-            returnedhash = "{:016x}".format(filehash)
+            returnedhash = f"{filehash:016x}"
             return returnedhash
 
         except OSError as e:
             self.console.print(
-                f"[bold red]Error: I/O error while generating hash for {media_path}: {e}[/]"
+                "[bold red]Error: I/O error while generating hash "
+                f"for {media_path}: {e}[/]"
             )
             return None
         except Exception as e:
@@ -490,7 +492,9 @@ class SubtitleUtils:
 
     @staticmethod
     def normalize_media_name(value):
-        """Drop apostrophes so queries match scene naming ("Widow's Bay" -> "Widows Bay")."""
+        """Drop apostrophes so queries match scene naming
+        ("Widow's Bay" -> "Widows Bay").
+        """
         if not value:
             return value
         return APOSTROPHE_RE.sub("", str(value))
@@ -737,7 +741,9 @@ class SubtitleUtils:
 
     @classmethod
     def _title_variants(cls, title):
-        """Every searchable spelling of one title: original, article-stripped, folded."""
+        """Every searchable spelling of one title: original, article-stripped,
+        folded.
+        """
         title = (title or "").strip()
         if not title:
             return []
@@ -1057,7 +1063,8 @@ class SubtitleUtils:
                 try:
                     choice = int(
                         self.console.input(
-                            "[yellow]Enter the index of the subtitle you want to download (0 to cancel): [/yellow]"
+                            "[yellow]Enter the index of the subtitle you want "
+                            "to download (0 to cancel): [/yellow]"
                         )
                     )
                     if choice == 0:

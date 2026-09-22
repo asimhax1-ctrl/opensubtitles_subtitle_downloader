@@ -42,7 +42,9 @@ def test_extract_season_and_episode_delegates_to_shared_evidence():
         ("The.Pitt.2024.S01E01", "2024", "pitt"),
     ],
 )
-def test_year_parsing_prefers_release_context(name, expected_year, expected_title_contains):
+def test_year_parsing_prefers_release_context(
+    name, expected_year, expected_title_contains
+):
     assert _year_of(name) == expected_year
     facets = parse_release_facets(name)
     assert expected_title_contains in facets.title

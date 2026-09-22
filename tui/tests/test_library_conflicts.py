@@ -2,9 +2,7 @@
 
 import io
 import zipfile
-from pathlib import Path
 
-import pytest
 import requests
 
 from library.OpenSubtitles import OpenSubtitles

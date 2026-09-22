@@ -1,13 +1,9 @@
 """Tests for subtitle cleaning: encoding fallback, ads literal handling, separator."""
 
-import shutil
-from pathlib import Path
 
-import pytest
 
 import library.clean_subtitles as clean_subtitles
 from library.subtitle_utils import SubtitleUtils
-
 
 UTF16_SRT = (
     b"\xff\xfe1\x000\x000\x00:\x000\x000\x00:\x000\x000\x00,\x000\x000\x000\x00"
@@ -44,7 +40,8 @@ def test_clean_ads_treats_patterns_as_literals(tmp_path):
     ads = tmp_path / "ads.txt"
     ads.write_text("[world\n**spam\n(+foo", encoding="utf-8")
 
-    clean_subtitles.clean_ads_regex(subtitle, ads.read_text(encoding="utf-8").splitlines())
+    ads_lines = ads.read_text(encoding="utf-8").splitlines()
+    clean_subtitles.clean_ads_regex(subtitle, ads_lines)
 
     content = subtitle.read_text(encoding="utf-8")
     assert "hello world" in content
@@ -91,7 +88,8 @@ def test_clean_ads_preserves_unmatched_lines(tmp_path):
     ads = tmp_path / "ads.txt"
     ads.write_text("third line", encoding="utf-8")
 
-    clean_subtitles.clean_ads_regex(subtitle, ads.read_text(encoding="utf-8").splitlines())
+    ads_lines = ads.read_text(encoding="utf-8").splitlines()
+    clean_subtitles.clean_ads_regex(subtitle, ads_lines)
 
     content = subtitle.read_text(encoding="utf-8")
     assert "first line" in content

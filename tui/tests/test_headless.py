@@ -322,6 +322,78 @@ def test_download_failure_increments_failed(tmp_path, application_config):
     assert summary.exit_code == 1
 
 
+def test_verification_failure_falls_back_to_next_candidate(
+    tmp_path, application_config
+):
+    media = tmp_path / "movie.mkv"
+    media.touch()
+    best = candidate()
+    second = candidate(provider_id="second", score=80)
+    jobs = FakeJobs(
+        [
+            DownloadResult(
+                provider=Provider.OPENSUBTITLES,
+                media_path=media,
+                error=(
+                    "Subtitle duration 4749.4s does not cover video "
+                    "duration 9602.7s"
+                ),
+                verification_failed=True,
+            )
+        ]
+    )
+    messages = []
+    runner = HeadlessAllProvidersRunner(
+        application_config,
+        adapters={Provider.OPENSUBTITLES: FakeAdapter()},
+        coordinator=FakeAllProvidersCoordinator([result(best, second)]),
+        jobs=jobs,
+        emit=messages.append,
+    )
+
+    summary = runner.run([media], "ar")
+
+    assert summary == HeadlessBatchSummary(attempted=1, succeeded=1, failed=0)
+    assert [c for c, _ in jobs.downloaded] == [best, second]
+    assert any("Trying next candidate" in message for message in messages)
+
+
+def test_verification_failure_exhausting_candidates_fails(
+    tmp_path, application_config
+):
+    media = tmp_path / "movie.mkv"
+    media.touch()
+    jobs = FakeJobs(
+        [
+            DownloadResult(
+                provider=Provider.OPENSUBTITLES,
+                media_path=media,
+                error="bad coverage",
+                verification_failed=True,
+            ),
+            DownloadResult(
+                provider=Provider.OPENSUBTITLES,
+                media_path=media,
+                error="wrong language",
+                verification_failed=True,
+            ),
+        ]
+    )
+    runner = HeadlessAllProvidersRunner(
+        application_config,
+        adapters={Provider.OPENSUBTITLES: FakeAdapter()},
+        coordinator=FakeAllProvidersCoordinator(
+            [result(candidate(), candidate(provider_id="second", score=80))]
+        ),
+        jobs=jobs,
+    )
+
+    summary = runner.run([media], "ar")
+
+    assert summary == HeadlessBatchSummary(attempted=1, succeeded=0, failed=1)
+    assert summary.exit_code == 1
+
+
 def test_exception_fails_one_file_and_continues(tmp_path, application_config):
     first = tmp_path / "first.mkv"
     second = tmp_path / "second.mkv"
@@ -382,6 +454,7 @@ def test_sync_ask_skips_sync_and_emits_one_notice(tmp_path, application_config):
         "clean": True,
         "sync": False,
         "ads_path": Path("ads.txt"),
+        "ads_separator": ",",
     }
     assert len([message for message in emitted if "sync" in message.lower()]) == 1
 
@@ -498,3 +571,64 @@ def test_headless_downloads_the_best_fallback_candidate_when_opted_in(
     assert not any(
         "general.auto_fallback_download" in message for message in emitted
     )
+
+
+def test_per_candidate_download_failure_falls_back_to_next_candidate(
+    tmp_path, application_config
+):
+    media = tmp_path / "movie.mkv"
+    media.touch()
+    best = candidate()
+    second = candidate(provider_id="second", score=80)
+    jobs = FakeJobs(
+        [
+            DownloadResult(
+                provider=Provider.OPENSUBTITLES,
+                media_path=media,
+                error="RuntimeError: Provider did not return a download link",
+            )
+        ]
+    )
+    messages = []
+    runner = HeadlessAllProvidersRunner(
+        application_config,
+        adapters={Provider.OPENSUBTITLES: FakeAdapter()},
+        coordinator=FakeAllProvidersCoordinator([result(best, second)]),
+        jobs=jobs,
+        emit=messages.append,
+    )
+
+    summary = runner.run([media], "ar")
+
+    assert summary == HeadlessBatchSummary(attempted=1, succeeded=1, failed=0)
+    assert [c for c, _ in jobs.downloaded] == [best, second]
+    assert any("Trying next candidate" in message for message in messages)
+
+
+def test_quota_failure_does_not_try_the_next_candidate(
+    tmp_path, application_config
+):
+    media = tmp_path / "movie.mkv"
+    media.touch()
+    best = candidate()
+    second = candidate(provider_id="second", score=80)
+    jobs = FakeJobs(
+        [
+            DownloadResult(
+                provider=Provider.OPENSUBTITLES,
+                media_path=media,
+                error="RuntimeError: OpenSubtitles download limit reached (429)",
+            )
+        ]
+    )
+    runner = HeadlessAllProvidersRunner(
+        application_config,
+        adapters={Provider.OPENSUBTITLES: FakeAdapter()},
+        coordinator=FakeAllProvidersCoordinator([result(best, second)]),
+        jobs=jobs,
+    )
+
+    summary = runner.run([media], "ar")
+
+    assert summary == HeadlessBatchSummary(attempted=1, succeeded=0, failed=1)
+    assert [c for c, _ in jobs.downloaded] == [best]

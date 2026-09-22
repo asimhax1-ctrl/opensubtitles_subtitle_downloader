@@ -1,5 +1,6 @@
 import pytest
 
+from library.subtitle_verifier import SubtitleVerifier
 from tui.domain import Candidate, DownloadResult, Provider
 from tui.jobs import JobCoordinator, sniff_subtitle_format
 
@@ -48,21 +49,23 @@ class FailingCleaner:
     def __init__(self, message):
         self.message = message
 
-    def clean(self, subtitle_path, ads_path=None):
+    def clean(self, subtitle_path, ads_path=None, ads_separator=","):
         raise RuntimeError(self.message)
 
 
 class RecordingCleaner:
     def __init__(self):
         self.ads_paths = []
+        self.separators = []
 
-    def clean(self, subtitle_path, ads_path=None):
+    def clean(self, subtitle_path, ads_path=None, ads_separator=","):
         self.ads_paths.append(ads_path)
+        self.separators.append(ads_separator)
         return True
 
 
 class StreamingSynchronizer:
-    def sync(self, media_path, subtitle_path, on_output=None):
+    def sync(self, media_path, subtitle_path, on_output=None, **kwargs):
         on_output("extracting speech segments...")
         on_output("...done")
         return True
@@ -350,3 +353,41 @@ def test_existing_ass_subtitle_is_detected_as_a_conflict(tmp_path):
     assert result.conflict_path == existing
     assert existing.read_text(encoding="utf-8") == ASS_BODY
     assert adapter.downloads == []
+
+
+def test_verification_failure_prevents_save(tmp_path):
+    adapter = RecordingAdapter(Provider.SUBDL)
+    adapter.body = "not a subtitle"
+    jobs = JobCoordinator(
+        {Provider.SUBDL: adapter},
+        verifier=SubtitleVerifier(),
+    )
+    media = tmp_path / "Movie.mkv"
+    media.touch()
+
+    result = jobs.download(candidate_for(Provider.SUBDL), media)
+
+    assert result.succeeded is False
+    assert "format" in (result.error or "").lower()
+    assert result.verification_failed is True
+    assert not (tmp_path / "Movie.en.srt").exists()
+
+
+def test_verified_subtitle_is_saved(tmp_path):
+    adapter = RecordingAdapter(Provider.SUBDL)
+    adapter.body = (
+        "1\n00:00:01,000 --> 00:00:03,000\nhello world\n"
+        "2\n00:09:55,000 --> 00:10:00,000\nbye\n"
+    )
+    jobs = JobCoordinator(
+        {Provider.SUBDL: adapter},
+        verifier=SubtitleVerifier(),
+    )
+    media = tmp_path / "Movie.mkv"
+    media.touch()
+
+    result = jobs.download(candidate_for(Provider.SUBDL), media)
+
+    assert result.succeeded
+    assert result.subtitle_path == tmp_path / "Movie.en.srt"
+    assert "hello world" in result.subtitle_path.read_text(encoding="utf-8")

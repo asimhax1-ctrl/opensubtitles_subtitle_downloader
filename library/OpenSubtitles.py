@@ -1,6 +1,7 @@
 # Handles subtitle search and download through the OpenSubtitles API.
 import json
 import re
+import time
 from pathlib import Path
 
 import requests
@@ -8,7 +9,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
-from library.subtitle_utils import SubtitleUtils
+from library.subtitle_utils import SubtitleUtils, report_existing_subtitle
 
 
 class OpenSubtitles:
@@ -43,11 +44,8 @@ class OpenSubtitles:
             directory.mkdir(parents=True, exist_ok=True)
         return directory / filename
 
-    def login(self):
-        token = self.subtitle_utils.read_token()
-        if token:
-            return token
-
+    def _fresh_login(self):
+        """POST a new token ignoring any cached value (used after a 401)."""
         url = "https://api.opensubtitles.com/api/v1/login"
 
         payload = {"username": self.username, "password": self.password}
@@ -74,6 +72,55 @@ class OpenSubtitles:
         except Exception as e:
             self.console.print(f"[bold red]Unexpected error during login: {e}[/]")
             return None
+
+    def login(self):
+        token = self.subtitle_utils.read_token()
+        if token:
+            return token
+
+        return self._fresh_login()
+
+    def health(self):
+        """Lightweight reachability probe for the OpenSubtitles API.
+
+        Returns a dict so the TUI adapter can build a HealthResult without
+        importing TUI types into the library layer.
+        """
+        if not self.api_key:
+            return {
+                "reachable": False,
+                "authenticated": False,
+                "latency_ms": None,
+                "reason": "API key not configured",
+            }
+
+        url = "https://api.opensubtitles.com/api/v1/infos/formats"
+        headers = {
+            "Accept": "application/json",
+            "Api-Key": self.api_key,
+            "User-Agent": self.user_agent,
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        started = time.perf_counter()
+        try:
+            response = requests.get(url, headers=headers, timeout=5)
+            response.raise_for_status()
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return {
+                "reachable": True,
+                "authenticated": bool(self.token),
+                "latency_ms": latency_ms,
+                "reason": f"reachable ({latency_ms} ms)",
+            }
+        except requests.exceptions.RequestException as exc:
+            return {
+                "reachable": False,
+                "authenticated": False,
+                "latency_ms": None,
+                "reason": f" unreachable: {exc}",
+            }
 
     def search(
         self,
@@ -133,13 +180,11 @@ class OpenSubtitles:
             query.strip() or media_path.stem
         )
         queries = [effective_query]
-        series_match = re.search(
-            r"(.+?)(?:\s-\sS\d{2}E\d{2}|\s-\s\d{4})",
-            effective_query,
-        )
-        if series_match:
-            queries.append(series_match.group(1))
+        clean_titles = self.subtitle_utils._title_hypotheses(effective_query)
+        if clean_titles:
+            queries.append(clean_titles[0])
         queries.extend(self.subtitle_utils.get_alternate_names(effective_query) or [])
+        queries = list(dict.fromkeys(queries))
 
         results = []
         request_failed = False
@@ -186,38 +231,97 @@ class OpenSubtitles:
 
     def get_download_link(self, selected_subtitles):
         url = "https://api.opensubtitles.com/api/v1/download"
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Api-Key": self.api_key,
-            "Authorization": f"Bearer {self.token}",
-            "User-Agent": self.user_agent,
-        }
-        payload = {}
+
+        def build_headers():
+            return {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Api-Key": self.api_key,
+                "Authorization": f"Bearer {self.token}",
+                "User-Agent": self.user_agent,
+            }
+
         try:
-            payload["file_id"] = int(
-                selected_subtitles["attributes"]["files"][0]["file_id"]
+            file_id = int(selected_subtitles["attributes"]["files"][0]["file_id"])
+        except (KeyError, TypeError, IndexError, ValueError) as e:
+            raise RuntimeError(
+                "OpenSubtitles result has no usable file_id "
+                f"({type(e).__name__}: {e}); try the next candidate"
             )
+        payload = {"file_id": file_id}
+        try:
             response = requests.post(
-                url, headers=headers, data=json.dumps(payload), timeout=10
+                url, headers=build_headers(), data=json.dumps(payload), timeout=10
             )
+            if response.status_code == 401 and self.username and self.password:
+                # The cached token is the usual suspect (expired/revoked):
+                # fetch one fresh token and retry the same file_id once.
+                refreshed = self._fresh_login()
+                if refreshed:
+                    self.token = refreshed
+                    response = requests.post(
+                        url,
+                        headers=build_headers(),
+                        data=json.dumps(payload),
+                        timeout=10,
+                    )
             response.raise_for_status()
-            return response.json()["link"]
+            link = response.json().get("link")
+            if not link:
+                raise RuntimeError(
+                    "OpenSubtitles accepted the request but returned no "
+                    "download link; try the next candidate"
+                )
+            return link
+        except requests.exceptions.HTTPError as e:
+            status = (
+                e.response.status_code if getattr(e, "response", None) else "unknown"
+            )
+            detail = ""
+            try:
+                body = e.response.text if getattr(e, "response", None) else ""
+                detail = f": {(body or '')[:200]}".rstrip()
+            except Exception:
+                detail = ""
+            if status == 401:
+                raise RuntimeError(
+                    "OpenSubtitles authentication failed (401). Check the "
+                    f"username/password/API key{detail}"
+                )
+            if status == 403:
+                raise RuntimeError(
+                    "OpenSubtitles refused the download (403). The account "
+                    f"may lack download rights{detail}"
+                )
+            if status == 429:
+                raise RuntimeError(
+                    "OpenSubtitles download limit reached (429). Daily quota "
+                    "is exhausted — try again tomorrow or use SubDL/SubSource"
+                    f"{detail}"
+                )
+            raise RuntimeError(
+                f"OpenSubtitles download request failed ({status}){detail}"
+            )
         except requests.exceptions.RequestException as e:
             self.console.print(
                 f"[bold red]Error during OpenSubtitles download link retrieval: {e}[/]"
             )
-            return None
+            raise RuntimeError(f"OpenSubtitles download request failed: {e}")
         except (KeyError, json.decoder.JSONDecodeError, TypeError, IndexError) as e:
             self.console.print(
                 f"[bold red]Error parsing OpenSubtitles download link response: {e}[/]"
             )
-            return None
+            raise RuntimeError(
+                "OpenSubtitles returned an unreadable download response "
+                f"({type(e).__name__}); try the next candidate"
+            )
+        except RuntimeError:
+            raise
         except Exception as e:
             self.console.print(
                 f"[bold red]Unexpected error during download link retrieval: {e}[/]"
             )
-            return None
+            raise RuntimeError(f"OpenSubtitles download failed: {e}")
 
     def save_subtitle(self, url, path):
         """Download and save subtitle file from url to path"""
@@ -250,10 +354,7 @@ class OpenSubtitles:
                 path,
                 f"{path.stem}.{language_choice}.srt",
             )
-            if self.output_directory is not None and subtitle_path.exists():
-                self.console.print(
-                    f"[bold red]Subtitle already exists: {subtitle_path}[/]"
-                )
+            if report_existing_subtitle(subtitle_path, self.console):
                 return False
             results, _request_failed = self._gather_candidates(
                 path,

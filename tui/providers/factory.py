@@ -78,7 +78,7 @@ def create_adapters(
         Provider.SUBSOURCE: (SubSourceAdapter, subsource_client),
     }
     return {
-        provider: adapter_type(LazyClient(factory))
+        provider: adapter_type(LazyClient(factory), config.providers[provider])
         for provider, (adapter_type, factory) in factories.items()
         if config.providers[provider].configured
     }

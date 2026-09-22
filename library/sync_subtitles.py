@@ -51,11 +51,40 @@ def sync_subs_srt(_reference_srt, _unsync_srt, _output):
     subprocess.call(_command)
 
 
+def _iter_process_output(stream):
+    """Yield process output split on both newlines and carriage returns.
+
+    ffmpeg and tqdm report progress by rewriting a \\r-terminated line, so a
+    plain ``for line in stream`` shows nothing for minutes on a large file.
+    Splitting on \\r too surfaces that progress as it happens. Streams that do
+    not support character reads (test fakes, pipes wrapped elsewhere) fall back
+    to line iteration.
+    """
+    if not hasattr(stream, "read"):
+        for line in stream:
+            yield line.rstrip("\r\n")
+        return
+    buffer = ""
+    while True:
+        chunk = stream.read(1)
+        if not chunk:
+            break
+        if chunk in "\r\n":
+            if buffer:
+                yield buffer
+                buffer = ""
+        else:
+            buffer += chunk
+    if buffer:
+        yield buffer
+
+
 def sync_subs_audio(
     media_path,
     subtitle_path,
     *,
     on_output: Callable[[str], None] | None = None,
+    cancel_event=None,
 ):
     media_path = Path(media_path)
     subtitle_path = Path(subtitle_path)
@@ -88,10 +117,24 @@ def sync_subs_audio(
         errors="replace",
         bufsize=1,
     )
+    if cancel_event is not None:
+        # A user-facing cancel must reach a subprocess that is mid-extraction:
+        # terminate it the moment the event is set, then let the read loop see
+        # the closed pipe and report the run as failed.
+        import threading
+
+        def _watch_cancel():
+            cancel_event.wait()
+            if process.poll() is None:
+                process.terminate()
+
+        threading.Thread(target=_watch_cancel, daemon=True).start()
     if process.stdout is not None:
-        for line in process.stdout:
-            on_output(line.rstrip("\r\n"))
+        for line in _iter_process_output(process.stdout):
+            on_output(line)
     returncode = process.wait()
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Subtitle sync was cancelled")
     if returncode:
         raise subprocess.CalledProcessError(returncode, _command)
     return True

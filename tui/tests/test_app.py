@@ -17,7 +17,15 @@ from tui.app import (
     SubsApp,
 )
 from tui.config import ConfigRepository
-from tui.domain import Candidate, EngineMode, Provider, ProviderSearchResult, QueueStatus
+from tui.domain import (
+    Candidate,
+    DownloadResult,
+    EngineMode,
+    PostProcessResult,
+    Provider,
+    ProviderSearchResult,
+    QueueStatus,
+)
 from tui.search import CoordinatedSearchResult, SearchCoordinator
 from tui.widgets.overlays.engine_switcher import EngineSwitcher
 from tui.widgets.overlays.lang_popover import LanguagePopover
@@ -1751,5 +1759,198 @@ def test_candidate_preview_renders_every_line_it_composes(configured_app):
 
             assert "- no hash match" in rendered
             assert "esc or p to close" in rendered
+
+    asyncio.run(run())
+
+
+def _finish_with_verification_failure(app, candidate, error):
+    download = DownloadResult(
+        provider=candidate.provider,
+        media_path=app.state.queue[0].path,
+        error=error,
+        verification_failed=True,
+    )
+    app._download_finished(
+        app.state.queue[0].key,
+        candidate,
+        download,
+        PostProcessResult(),
+    )
+
+
+def test_verification_failure_falls_back_to_next_ranked_candidate(
+    configured_app,
+):
+    app, coordinator = configured_app
+    first, second = coordinator.candidates
+    launched = []
+    app.run_download = lambda item_key, candidate, overwrite: launched.append(
+        (candidate.key, overwrite)
+    )
+    item_key = app.state.queue[0].key
+    app._attempted_candidate_keys.setdefault(item_key, set()).add(first.key)
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.2)
+            app.candidates = list(coordinator.candidates)
+            _finish_with_verification_failure(
+                app,
+                first,
+                "Subtitle duration 4749.4s does not cover video duration 9602.7s",
+            )
+            await pilot.pause()
+
+            assert launched == [(second.key, False)]
+            assert app.last_error is not None
+
+    asyncio.run(run())
+
+
+def test_verification_failure_marks_failed_when_candidates_exhausted(
+    configured_app,
+):
+    app, coordinator = configured_app
+    first, second = coordinator.candidates
+    launched = []
+    app.run_download = lambda item_key, candidate, overwrite: launched.append(
+        (candidate.key, overwrite)
+    )
+    item_key = app.state.queue[0].key
+    attempted = app._attempted_candidate_keys.setdefault(item_key, set())
+    attempted.update({first.key, second.key})
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.2)
+            app.candidates = list(coordinator.candidates)
+            _finish_with_verification_failure(
+                app,
+                second,
+                "Subtitle language does not match requested language 'ar'",
+            )
+            await pilot.pause()
+
+            assert launched == []
+            assert app.state.queue[0].status is QueueStatus.FAILED
+
+    asyncio.run(run())
+
+
+def test_failed_item_can_be_repicked_from_results_table(configured_app):
+    app, coordinator = configured_app
+    first, _second = coordinator.candidates
+    launched = []
+    app.run_download = lambda item_key, candidate, overwrite: launched.append(
+        (item_key, candidate.key, overwrite)
+    )
+    item_key = app.state.queue[0].key
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.2)
+            app.candidates = list(coordinator.candidates)
+            app.state.mark_failed(item_key, "Subtitle duration too short")
+            assert app.state.active_item is None
+
+            app.action_download_cursor()
+            await pilot.pause()
+
+            assert launched == [(item_key, first.key, False)]
+
+    asyncio.run(run())
+
+
+def _finish_with_plain_download_failure(app, candidate, error):
+    download = DownloadResult(
+        provider=candidate.provider,
+        media_path=app.state.queue[0].path,
+        error=error,
+    )
+    app._download_finished(
+        app.state.queue[0].key,
+        candidate,
+        download,
+        PostProcessResult(),
+    )
+
+
+def test_per_candidate_download_failure_falls_back_to_next_candidate(
+    configured_app,
+):
+    app, coordinator = configured_app
+    first, second = coordinator.candidates
+    launched = []
+    app.run_download = lambda item_key, candidate, overwrite: launched.append(
+        (candidate.key, overwrite)
+    )
+    item_key = app.state.queue[0].key
+    app._attempted_candidate_keys.setdefault(item_key, set()).add(first.key)
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.2)
+            app.candidates = list(coordinator.candidates)
+            _finish_with_plain_download_failure(
+                app,
+                first,
+                "RuntimeError: Provider did not return a download link",
+            )
+            await pilot.pause()
+
+            assert launched == [(second.key, False)]
+            assert "Trying next candidate" in app.notice
+
+    asyncio.run(run())
+
+
+def test_quota_failure_does_not_burn_the_next_candidate(configured_app):
+    app, coordinator = configured_app
+    first, _second = coordinator.candidates
+    launched = []
+    app.run_download = lambda item_key, candidate, overwrite: launched.append(
+        (candidate.key, overwrite)
+    )
+    item_key = app.state.queue[0].key
+    app._attempted_candidate_keys.setdefault(item_key, set()).add(first.key)
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.2)
+            app.candidates = list(coordinator.candidates)
+            _finish_with_plain_download_failure(
+                app,
+                first,
+                "RuntimeError: OpenSubtitles download limit reached (429)",
+            )
+            await pilot.pause()
+
+            assert launched == []
+            assert app.state.queue[0].status is QueueStatus.FAILED
+            assert "All providers" in app.notice
+
+    asyncio.run(run())
+
+
+def test_download_start_clears_the_stale_error(configured_app):
+    app, coordinator = configured_app
+    first, second = coordinator.candidates
+    item_key = app.state.queue[0].key
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.2)
+            app.candidates = list(coordinator.candidates)
+            item = app.state.queue[0]
+            item.candidate_keys = [first.key, second.key]
+            app.state.mark_failed(item_key, "RuntimeError: old failure")
+            app.last_error = "RuntimeError: old failure"
+
+            app._download_started(item_key, second.key)
+            await pilot.pause()
+
+            assert app.last_error is None
+            assert app.state.queue[0].error is None
+            assert app.notice.startswith("Downloading")
 
     asyncio.run(run())

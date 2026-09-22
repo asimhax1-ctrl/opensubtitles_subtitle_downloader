@@ -25,9 +25,17 @@ class OpenSubtitlesAdapter(StandardProviderAdapter):
         try:
             link = self.client.get_download_link(candidate.download_ref)
             if not link:
-                raise RuntimeError("Provider did not return a download link")
+                raise RuntimeError(
+                    "Provider did not return a download link. Try the next "
+                    "candidate or All providers (m); if every OpenSubtitles "
+                    "row fails, the API quota/login is the likely cause "
+                    "(press r to probe)"
+                )
             if not self.client.save_subtitle(link, target):
-                raise RuntimeError("Provider did not save the subtitle")
+                raise RuntimeError(
+                    "Provider returned a link but the subtitle could not be "
+                    "saved. Try the next candidate"
+                )
         except Exception as exc:
             return DownloadResult(
                 provider=self.provider,

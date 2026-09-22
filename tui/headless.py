@@ -7,10 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tui.config import ApplicationConfig
-from tui.domain import EngineMode, Provider, SearchRequest
+from tui.domain import EngineMode, Provider, SearchRequest, should_try_next_candidate
 from tui.jobs import JobCoordinator
 from tui.providers.base import ProviderAdapter
 from tui.search import SearchCoordinator
+
+from library.subtitle_verifier import SubtitleVerifier
 
 # The configuration key that turns automatic fallback download on. Defined once so the
 # emitted guidance and the configuration surface cannot drift apart.
@@ -44,6 +46,9 @@ class HeadlessAllProvidersRunner:
         self.jobs = jobs or JobCoordinator(
             adapters,
             output_directory=config.general.subtitle_output_directory or None,
+            verifier=SubtitleVerifier()
+            if config.general.verify_subtitles
+            else None,
         )
         self.emit = emit or print
 
@@ -112,6 +117,33 @@ class HeadlessAllProvidersRunner:
                     continue
 
                 download = self.jobs.download(result.candidates[0], media)
+                # A rejected subtitle (bad coverage, wrong language, corrupt
+                # format) means that candidate was bad, not the request: walk
+                # down the ranked list instead of failing the whole file. The
+                # same holds for per-candidate download errors (bad file_id,
+                # unreadable response); account-wide failures (auth/quota) stop
+                # immediately since every candidate would fail identically.
+                candidate_index = 1
+                while (
+                    download.conflict_path is None
+                    and not download.succeeded
+                    and should_try_next_candidate(download)
+                    and candidate_index < len(result.candidates)
+                ):
+                    rejected = result.candidates[candidate_index - 1]
+                    verb = (
+                        "Rejected"
+                        if download.verification_failed
+                        else "Download failed for"
+                    )
+                    self.emit(
+                        f"Warning: {verb} {rejected.release or rejected.key}: "
+                        f"{download.error}. Trying next candidate."
+                    )
+                    download = self.jobs.download(
+                        result.candidates[candidate_index], media
+                    )
+                    candidate_index += 1
                 if download.conflict_path is not None:
                     self.emit(
                         f"Error: Subtitle already exists: {download.conflict_path}"
@@ -130,6 +162,7 @@ class HeadlessAllProvidersRunner:
                     clean=self.config.cleaning.enabled,
                     sync=sync_policy == "always",
                     ads_path=self.config.cleaning.ads_file_path,
+                    ads_separator=self.config.cleaning.separator,
                 )
                 for warning in (
                     postprocess.utf8_error,

@@ -91,7 +91,7 @@ def test_config_diff_never_contains_credentials(tmp_path):
     diff = repo.save(config)
 
     assert "replacement-secret" not in repr(diff)
-    assert diff.changed_fields == ["subdl.api_key"]
+    assert diff.changed_fields == ["general.verify_subtitles", "subdl.api_key"]
 
 
 def test_missing_config_loads_safe_defaults(tmp_path):
@@ -130,6 +130,7 @@ def test_all_providers_round_trips_canonically(tmp_path):
         "no_tui",
         "hearing_impaired",
         "show_ai_translated",
+        "verify_subtitles",
     }
 
 
@@ -160,6 +161,7 @@ def test_save_removes_obsolete_duplicate_backend_key(tmp_path):
         "no_tui": False,
         "hearing_impaired": "include",
         "show_ai_translated": True,
+        "verify_subtitles": True,
     }
 
 
@@ -235,3 +237,20 @@ def test_sync_default_is_written_as_the_false_token(tmp_path):
     repository.save(repository.load())
 
     assert "sync_audio_to_subs: false" in path.read_text(encoding="utf-8")
+
+
+def test_cleaning_separator_round_trips(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "cleaning_subtitles:\n  ads:\n    separator: ';'\n",
+        encoding="utf-8",
+    )
+    repository = ConfigRepository(path)
+    config = repository.load()
+
+    assert config.cleaning.separator == ";"
+
+    config.cleaning.separator = "|"
+    repository.save(config)
+
+    assert ConfigRepository(path).load().cleaning.separator == "|"

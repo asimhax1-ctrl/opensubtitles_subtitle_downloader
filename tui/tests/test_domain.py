@@ -2,10 +2,13 @@ from pathlib import Path
 
 from tui.domain import (
     Candidate,
+    DownloadResult,
     EngineMode,
     Provider,
     SearchRequest,
     compatibility_summary,
+    is_global_download_failure,
+    should_try_next_candidate,
 )
 
 
@@ -138,3 +141,45 @@ def test_candidate_defaults_are_format_none_and_no_reasons():
 
     assert candidate.format is None
     assert candidate.match_reasons == ()
+
+
+def test_quota_and_auth_errors_are_global_download_failures():
+    assert is_global_download_failure(
+        "RuntimeError: OpenSubtitles download limit reached (429)"
+    )
+    assert is_global_download_failure(
+        "RuntimeError: OpenSubtitles authentication failed (401)"
+    )
+    assert is_global_download_failure(None) is False
+
+
+def test_per_candidate_link_failure_is_not_global():
+    assert (
+        is_global_download_failure(
+            "RuntimeError: Provider did not return a download link"
+        )
+        is False
+    )
+
+
+def _download(error, verification_failed=False):
+    return DownloadResult(
+        provider=Provider.OPENSUBTITLES,
+        media_path=Path("Movie.mkv"),
+        error=error,
+        verification_failed=verification_failed,
+    )
+
+
+def test_should_try_next_candidate_for_per_candidate_failures():
+    assert should_try_next_candidate(_download("bad file_id; try the next candidate"))
+    assert should_try_next_candidate(_download("verification reason", True))
+
+
+def test_should_not_try_next_candidate_for_global_failures():
+    assert (
+        should_try_next_candidate(_download("download limit reached (429)")) is False
+    )
+    assert (
+        should_try_next_candidate(_download("authentication failed (401)")) is False
+    )

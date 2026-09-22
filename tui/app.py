@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import sys
+import threading
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -44,8 +45,11 @@ from tui.domain import (
     QueueStatus,
     SearchRequest,
     compatibility_summary,
+    is_global_download_failure,
+    should_try_next_candidate,
 )
 from tui.jobs import JobCoordinator
+from library.subtitle_verifier import SubtitleVerifier
 from tui.keymap import Action, Keymap
 from tui.media import expand_media_paths, resolve_media_extensions
 from tui.providers import create_adapters
@@ -169,11 +173,13 @@ class SyncProgress(ModalScreen[None]):
         Binding("enter", "close", "Close", show=False, priority=True),
         Binding("escape", "close", "Close", show=False, priority=True),
         Binding("q", "close", "Close", show=False, priority=True),
+        Binding("c", "cancel", "Cancel sync", show=False, priority=True),
     ]
 
-    def __init__(self, subtitle_path: Path) -> None:
+    def __init__(self, subtitle_path: Path, cancel_event=None) -> None:
         super().__init__()
         self.subtitle_path = subtitle_path
+        self.cancel_event = cancel_event
         self.complete = False
 
     def compose(self) -> ComposeResult:
@@ -188,7 +194,8 @@ class SyncProgress(ModalScreen[None]):
                 auto_scroll=True,
             )
             yield Static(
-                "Sync is running · this may take several minutes",
+                "Sync is running · large files may take several minutes · "
+                "c cancels",
                 id="sync-progress-footer",
             )
 
@@ -211,6 +218,14 @@ class SyncProgress(ModalScreen[None]):
     def action_close(self) -> None:
         if self.complete:
             self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        if self.cancel_event is None or self.complete:
+            return
+        self.cancel_event.set()
+        self.query_one("#sync-progress-footer", Static).update(
+            "Cancelling…",
+        )
 
 
 class CandidatePreview(ModalScreen[None]):
@@ -470,6 +485,9 @@ class SubsApp(App):
         self.raw_config = copy.deepcopy(config or {})
         self.overrides = overrides or {}
         self.language_resolution = language_resolution
+        # Candidate keys already attempted per queue item, so a verification
+        # failure can fall back to the next ranked candidate without loops.
+        self._attempted_candidate_keys: dict[str, set[str]] = {}
         self.config_path = Path(config_path) if config_path else None
         self.config_repository = ConfigRepository(
             self.config_path or Path("config.yaml")
@@ -551,6 +569,9 @@ class SubsApp(App):
         self.jobs = jobs or JobCoordinator(
             self.adapters,
             output_directory=output_directory,
+            verifier=SubtitleVerifier()
+            if self.application_config.general.verify_subtitles
+            else None,
         )
         self.keymap = Keymap()
         self._rebuild_keymap()
@@ -603,6 +624,7 @@ class SubsApp(App):
             "no_tui",
             "hearing_impaired",
             "show_ai_translated",
+            "verify_subtitles",
         ):
             if name in general:
                 setattr(self.application_config.general, name, general[name])
@@ -1078,6 +1100,18 @@ class SubsApp(App):
     def action_download_cursor(self) -> None:
         candidate = self.current_candidate()
         item = self.state.active_item
+        if item is None:
+            # After a failure the queue has no active item, but the results
+            # table still shows the failed item's candidates; picking one of
+            # them must retry that item instead of being silently ignored.
+            item = next(
+                (
+                    queued
+                    for queued in self.state.queue
+                    if queued.status is QueueStatus.FAILED
+                ),
+                None,
+            )
         if candidate is None or item is None or self.downloading:
             return
         self._pending_download = candidate
@@ -1124,11 +1158,13 @@ class SubsApp(App):
                 )
                 return
             sync = sync_policy == "always"
+            sync_cancel = threading.Event() if sync else None
             if sync:
                 self.call_from_thread(
                     self._sync_started,
                     item_key,
                     download.subtitle_path,
+                    sync_cancel,
                 )
             postprocess = self.jobs.postprocess(
                 download,
@@ -1136,7 +1172,9 @@ class SubsApp(App):
                 clean=self.application_config.cleaning.enabled,
                 sync=sync,
                 ads_path=self.application_config.cleaning.ads_file_path,
+                ads_separator=self.application_config.cleaning.separator,
                 sync_output=self._forward_sync_output if sync else None,
+                sync_cancel_event=sync_cancel,
             )
         except Exception as exc:
             self.call_from_thread(
@@ -1178,11 +1216,13 @@ class SubsApp(App):
         sync: bool,
     ) -> None:
         try:
+            sync_cancel = threading.Event() if sync else None
             if sync:
                 self.call_from_thread(
                     self._sync_started,
                     item_key,
                     download.subtitle_path,
+                    sync_cancel,
                 )
             postprocess = self.jobs.postprocess(
                 download,
@@ -1190,7 +1230,9 @@ class SubsApp(App):
                 clean=self.application_config.cleaning.enabled,
                 sync=sync,
                 ads_path=self.application_config.cleaning.ads_file_path,
+                ads_separator=self.application_config.cleaning.separator,
                 sync_output=self._forward_sync_output if sync else None,
+                sync_cancel_event=sync_cancel,
             )
         except Exception as exc:
             self.call_from_thread(
@@ -1207,9 +1249,14 @@ class SubsApp(App):
             postprocess,
         )
 
-    def _sync_started(self, item_key: str, subtitle_path: Path) -> None:
+    def _sync_started(
+        self,
+        item_key: str,
+        subtitle_path: Path,
+        cancel_event=None,
+    ) -> None:
         self.state.begin_postprocess(item_key)
-        progress = SyncProgress(subtitle_path)
+        progress = SyncProgress(subtitle_path, cancel_event)
         self._sync_progress = progress
         self._exit_when_sync_closes = False
         self.push_screen(
@@ -1233,10 +1280,31 @@ class SubsApp(App):
         if self._sync_progress is not None:
             self._sync_progress.write_output(line)
 
+    def _next_candidate_to_try(self, item_key: str) -> Candidate | None:
+        """First ranked candidate not attempted yet for this queue item."""
+        attempted = self._attempted_candidate_keys.get(item_key, set())
+        for candidate in self.candidates:
+            if candidate.key not in attempted:
+                return candidate
+        return None
+
     def _download_started(self, item_key: str, candidate_key: str) -> None:
         item = next(item for item in self.state.queue if item.key == item_key)
+        self._attempted_candidate_keys.setdefault(item_key, set()).add(candidate_key)
+        # A new attempt supersedes any previous failure: clear the stale error
+        # immediately so the status bar shows progress, not yesterday's message.
+        # Without this, picking a second candidate after a failure looks like
+        # the app "did not respond" until the new attempt finishes.
+        self.last_error = None
+        item.error = None
         if item.status is not QueueStatus.AWAITING_PICK:
             item.status = QueueStatus.AWAITING_PICK
+        candidate_label = candidate_key
+        for candidate in self.candidates:
+            if candidate.key == candidate_key:
+                candidate_label = candidate.release or candidate.key
+                break
+        self.notice = f"Downloading {candidate_label}…"
         self.state.begin_download(item_key, candidate_key)
         self.downloading = True
         self._refresh_all()
@@ -1268,8 +1336,33 @@ class SubsApp(App):
             self._refresh_all()
             return
         if not download.succeeded:
+            retry = (
+                self._next_candidate_to_try(item_key)
+                if should_try_next_candidate(download)
+                else None
+            )
+            if retry is not None:
+                self.last_error = download.error
+                verb = (
+                    "Rejected"
+                    if download.verification_failed
+                    else "Download failed for"
+                )
+                self.notice = (
+                    f"{verb} {candidate.release or candidate.key}: "
+                    f"{download.error}. Trying next candidate…"
+                )
+                self._refresh_all()
+                self.run_download(item_key, retry, False)
+                return
             self.state.mark_failed(item_key, download.error or "Download failed")
             self.last_error = download.error
+            if is_global_download_failure(download.error):
+                self.notice = (
+                    f"{download.error}. Picking another {candidate.provider.label} "
+                    "row will fail the same way — press m for All providers "
+                    "or r to probe providers"
+                )
             self._advance_queue()
             return
         history = HistoryEntry(

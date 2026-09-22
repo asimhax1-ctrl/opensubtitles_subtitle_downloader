@@ -1,5 +1,6 @@
 # SubDL.py is a class that handles subtitle search and download from SubDL API.
 import re
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +11,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
-from library.subtitle_utils import SubtitleUtils
+from library.subtitle_utils import SubtitleUtils, report_existing_subtitle
 
 
 @dataclass
@@ -82,6 +83,45 @@ class SubDL:
             for sub in subtitles
         ]
         return [s for s in standardized if s]
+
+    def health(self):
+        """Lightweight reachability probe for the SubDL API.
+
+        Returns a dict so the TUI adapter can build a HealthResult without
+        importing TUI types into the library layer.
+        """
+        if not self.api_key:
+            return {
+                "reachable": False,
+                "authenticated": False,
+                "latency_ms": None,
+                "reason": "API key not configured",
+            }
+
+        started = time.perf_counter()
+        try:
+            data = self._request("/me", {})
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            if isinstance(data, dict) and data.get("error"):
+                return {
+                    "reachable": True,
+                    "authenticated": False,
+                    "latency_ms": latency_ms,
+                    "reason": f"reachable ({latency_ms} ms): {data['error']}",
+                }
+            return {
+                "reachable": True,
+                "authenticated": True,
+                "latency_ms": latency_ms,
+                "reason": f"reachable ({latency_ms} ms)",
+            }
+        except requests.exceptions.RequestException as exc:
+            return {
+                "reachable": False,
+                "authenticated": False,
+                "latency_ms": None,
+                "reason": f"unreachable: {exc}",
+            }
 
     def search(
         self,
@@ -194,10 +234,10 @@ class SubDL:
         # 2) by filename (legacy)
         add(self.search(file_name=media_name, languages=language))
 
-        # 3) by series name
-        series_match = re.search(r"(.+?)(?:\s-\sS\d{2}E\d{2}|\s-\s\d{4})", media_name)
-        if series_match:
-            add(self.search(film_name=series_match.group(1), languages=language))
+        # 3) by clean series/title name (handles dotted scene names, not just " - ")
+        clean_titles = self.subtitle_utils._title_hypotheses(media_name)
+        if clean_titles:
+            add(self.search(film_name=clean_titles[0], languages=language))
 
         # resolve season/episode once for the precise TV pass
         video_season, video_episode = self.subtitle_utils.extract_season_and_episode(
@@ -306,8 +346,7 @@ class SubDL:
             video_input_path, language_choice, ext
         )
         target_path = self._output_path(video_input_path, target_filename)
-        if self.output_directory is not None and target_path.exists():
-            self.console.print(f"[bold red]Subtitle already exists: {target_path}[/]")
+        if report_existing_subtitle(target_path, self.console):
             return None
         decoded = self._decode_bytes(response.content)
         with open(target_path, "w", encoding="utf-8") as f:
@@ -374,52 +413,41 @@ class SubDL:
                             matching_subtitle = subtitle_file
                             break
 
-                for subtitle_file in ass_files + ssa_files + srt_files:
-                    try:
-                        with zip_ref.open(subtitle_file) as source:
-                            decoded_content = self._decode_bytes(source.read())
+                if matching_subtitle is None:
+                    return None
 
-                        if subtitle_file == matching_subtitle:
-                            # The preferred name keeps the archive member's own
-                            # extension, so an ASS or SSA match is never renamed .srt.
-                            target_filename = self._target_subtitle_name(
-                                video_input_path,
-                                language_choice,
-                                Path(subtitle_file).suffix,
-                            )
-                            selected_subtitle_path = self._output_path(
-                                video_input_path,
-                                target_filename,
-                            )
-                        else:
-                            original_name = Path(subtitle_file).stem
-                            extension = Path(subtitle_file).suffix
-                            target_filename = (
-                                f"{original_name}.{language_choice}{extension}"
-                            )
+                try:
+                    subtitle_file = matching_subtitle
+                    with zip_ref.open(subtitle_file) as source:
+                        decoded_content = self._decode_bytes(source.read())
 
-                        target_path = self._output_path(
-                            video_input_path,
-                            target_filename,
-                        )
-                        if self.output_directory is not None and target_path.exists():
-                            if target_path == selected_subtitle_path:
-                                selected_subtitle_path = None
-                            self.console.print(
-                                f"[bold red]Subtitle already exists: {target_path}[/]"
-                            )
-                            continue
-                        with open(target_path, "w", encoding="utf-8") as target:
-                            target.write(decoded_content)
-                        self.console.print(
-                            "[green]Subtitle extracted and saved as: "
-                            f"{target_filename}[/green]"
-                        )
-                    except Exception as e:
-                        self.console.print(
-                            "[bold red]Error processing subtitle file "
-                            f"{subtitle_file}: {e}[/]"
-                        )
+                    # The preferred name keeps the archive member's own
+                    # extension, so an ASS or SSA match is never renamed .srt.
+                    target_filename = self._target_subtitle_name(
+                        video_input_path,
+                        language_choice,
+                        Path(subtitle_file).suffix,
+                    )
+                    selected_subtitle_path = self._output_path(
+                        video_input_path,
+                        target_filename,
+                    )
+
+                    if report_existing_subtitle(
+                        selected_subtitle_path, self.console
+                    ):
+                        return None
+                    with open(selected_subtitle_path, "w", encoding="utf-8") as target:
+                        target.write(decoded_content)
+                    self.console.print(
+                        "[green]Subtitle extracted and saved as: "
+                        f"{target_filename}[/green]"
+                    )
+                except Exception as e:
+                    self.console.print(
+                        "[bold red]Error processing subtitle file "
+                        f"{subtitle_file}: {e}[/]"
+                    )
         finally:
             zip_path.unlink(missing_ok=True)
 

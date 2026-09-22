@@ -115,7 +115,7 @@ BADGE_BANDS = (
 # common source spelling of all. Appended rather than inserted into
 # subtitle_utils.SOURCE_PATTERNS, whose order decides explain_subtitle_match's
 # locked scores.
-SOURCE_LABELS = SOURCE_PATTERNS + (("dvdrip", "DVDRip"), ("web", "WEB"))
+SOURCE_LABELS = SOURCE_PATTERNS + (("dvdrip", "DVDRip"),)
 SOURCE_TOKENS = frozenset(token for token, _ in SOURCE_LABELS)
 
 # Ordered most specific first, and the first rule that matches wins on both sides
@@ -162,6 +162,7 @@ NOISE_WORDS = frozenset(
         "hd",
         "hdr",
         "hdr10",
+        "hdr10plus",
         "hearing",
         "hi",
         "impaired",
@@ -173,6 +174,16 @@ NOISE_WORDS = frozenset(
         "sdr",
         "season",
         "uhd",
+        # Audio lines and variants
+        "dd",
+        "ddp",
+        "aac",
+        "ac3",
+        "eac3",
+        "dts",
+        "dtshdma",
+        "truehd",
+        "atmos",
     }
 )
 SEASON_EPISODE_RE = re.compile(
@@ -386,15 +397,52 @@ def compatibility_badge(percent: int) -> str:
     return MISMATCH_BADGE
 
 
+# Compound audio/codec/hdr tokens that survive `_words` as fragments unless
+# they are collapsed to single canonical tokens first. Order matters: longer,
+# more specific patterns must precede shorter ones (e.g. HDR10Plus before HDR10).
+_RELEASE_TOKEN_NORMALIZATIONS = (
+    # Audio lines: match the codec abbreviation plus optional channel count,
+    # but stop before the separator that belongs to the next token so the
+    # replacement does not swallow it (e.g. "AAC2.0.H.264" -> "aac.h264").
+    (r"ddp\+?\d*(?:\.\d+)?", "ddp"),
+    (r"dd\+?\d*(?:\.\d+)?", "dd"),
+    (r"eac3", "eac3"),
+    (r"ac3", "ac3"),
+    (r"aac\d*(?:\.\d+)?", "aac"),
+    (r"dts[.\s-]*hd[.\s-]*ma(?:\d+(?:\.\d+)?)?", "dtshdma"),
+    (r"dts\d*(?:\.\d+)?", "dts"),
+    (r"truehd", "truehd"),
+    (r"atmos", "atmos"),
+    (r"hdr10(?:plus|\+)?", "hdr10"),
+    (r"h\.264", "h264"),
+    (r"h\.265", "h265"),
+)
+
+
+def _normalize_release_text(text: str) -> str:
+    """Collapse compound technical phrases into single canonical tokens.
+
+    Without this, "DDP5.1" fragments into "ddp5", "1" and the title keeps the
+    audio-line junk; "H.264" fragments into "h", "264" and the codec is lost.
+    Case is preserved so the release group keeps its original spelling.
+    """
+    normalized = str(text or "")
+    for pattern, replacement in _RELEASE_TOKEN_NORMALIZATIONS:
+        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+    return normalized
+
+
 def parse_release_facets(name: object) -> ReleaseFacets:
     """Read every facet a release name states. States nothing it cannot read."""
     text = MEDIA_EXTENSION_RE.sub("", str(name or "").strip())
+    text = _normalize_release_text(text)
     words = _words(text)
-    year = _year_of(text)
-    edition = _edition_of(words)
+    year_text = _year_of(text)
+    year = int(year_text) if year_text else None
+    edition = _edition_of(words, text=text)
     resolution = _resolution_of(text)
     codec = _codec_of(words)
-    source = _source_of(text)[0]
+    source, source_token = _source_of(text)
     group = _group_of(text)
     season, episode = _episode_of(text)
 
@@ -402,11 +450,12 @@ def parse_release_facets(name: object) -> ReleaseFacets:
         title=" ".join(
             _title_words(
                 words,
-                year=year,
+                year_text=year_text,
                 season=season,
                 episode=episode,
                 edition=edition,
                 group=group,
+                source_token=source_token,
             )
         ),
         year=year,
@@ -594,6 +643,14 @@ def _compare_facet(
             float(rule.points),
             Signal(rule.label.format(media_value), True, float(rule.points)),
         )
+    # Release-group and ordinary technical differences are not identity
+    # conflicts: they should not hide the title/year/source evidence that made
+    # the result a match in the first place.
+    if rule.name == "group":
+        return _Outcome(
+            -float(rule.conflict_penalty),
+            Signal("different group", False),
+        )
     return _Outcome(
         -float(rule.conflict_penalty),
         Signal(f"{rule.name} conflict", False),
@@ -621,22 +678,29 @@ def _words(text: str) -> list[str]:
 def _title_words(
     words: list[str],
     *,
-    year: int | None,
+    year_text: str | None,
     season: int | None,
     episode: int | None,
     edition: str | None,
     group: str | None,
+    source_token: str | None = None,
 ) -> list[str]:
     """What is left of a name once every facet it states has been taken out.
 
-    TECHNICAL_WORDS has already covered source, resolution and codec spellings;
-    what is added here is the evidence that is only a facet *because it was
-    read* -- a number that became the year, a word that became the edition, the
-    token that became the release group.
+    Codec, resolution and noise tokens are always removed. Source tokens are
+    only removed when they were actually matched by ``_source_of``; this keeps
+    real title words such as ``web`` in *Charlotte Web* while still stripping
+    the source tag from *WEB-DL*. Only the specific year text that was chosen
+    is removed, so year-titled films keep their title year.
     """
-    consumed = set(TECHNICAL_WORDS)
-    if year is not None:
-        consumed.add(str(year))
+    consumed = set(CODEC_TOKENS | RESOLUTION_TOKENS | NOISE_WORDS)
+    if source_token is not None:
+        consumed.update(
+            part
+            for part in KEEP_MATCH_CHARS_RE.sub(" ", source_token).lower().split()
+        )
+    if year_text is not None:
+        consumed.add(year_text)
     if season is not None:
         consumed.add(str(season))
     if episode is not None:
@@ -663,9 +727,66 @@ def _edition_words(edition: str) -> frozenset[str]:
     return frozenset()
 
 
-def _year_of(text: str) -> int | None:
-    match = YEAR_RE.search(str(text or ""))
-    return int(match.group(0)) if match else None
+def _year_of(text: str) -> str | None:
+    """Choose the year most consistent with a release name.
+
+    Year-titled films ("2012.2009.1080p") break if the first year wins, because
+    the title year is removed and the actual release year is left in the title.
+    Prefer a year adjacent to a resolution/source/codec token; otherwise fall
+    back to the last plausible year so the leading title year survives.
+    """
+    text_str = str(text or "")
+    matches = list(YEAR_RE.finditer(text_str))
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0].group(0)
+
+    words = _words(text_str)
+    technical = frozenset(
+        {
+            "480p",
+            "720p",
+            "1080p",
+            "2160p",
+            "4k",
+            "8k",
+            "bluray",
+            "brrip",
+            "webdl",
+            "web-dl",
+            "webrip",
+            "hdtv",
+            "hdrip",
+            "remux",
+            "dvdrip",
+            "x264",
+            "x265",
+            "h264",
+            "h265",
+            "hevc",
+            "avc",
+        }
+    )
+    indexed_words = {
+        match.group(0): index
+        for index, match in enumerate(
+            re.finditer(r"[0-9A-Za-z]+", text_str.lower())
+        )
+    }
+
+    def score(match: re.Match) -> tuple[bool, int]:
+        word_index = indexed_words.get(match.group(0), len(words))
+        near_technical = any(
+            word.lower() in technical
+            for word in words[max(0, word_index - 2) : word_index + 3]
+        )
+        return (near_technical, match.start())
+
+    # Prefer technical-context years; among those, prefer the last one (release
+    # names usually put the real year closest to the quality tokens).
+    scored = sorted(matches, key=score)
+    return scored[-1].group(0)
 
 
 def _episode_of(text: str) -> tuple[int | None, int | None]:
@@ -687,14 +808,32 @@ def _episode_of(text: str) -> tuple[int | None, int | None]:
     return None, None
 
 
-def _edition_of(words: list[str]) -> str | None:
+def _edition_of(words: list[str], *, text: str = "") -> str | None:
     pairs = set(zip(words, words[1:]))
+    lowered = str(text or "").lower()
     for tokens, label in EDITION_RULES:
         if len(tokens) == 2:
             if tokens in pairs:
                 return label
-        elif tokens[0] in words:
-            return label
+            continue
+        token = tokens[0]
+        if token not in words:
+            continue
+        # Single-token edition abbreviations are prone to false positives on
+        # titles ("DC League of Super-Pets", "IMAX ..."). Require them to sit
+        # in a release context: after a year, resolution, source, or codec token.
+        if token in ("dc", "imax"):
+            # Use the last occurrence so edition abbreviations placed at the end
+            # of a release name are detected while leading title words are not.
+            last_index = lowered.rfind(token)
+            if last_index > 0 and re.search(
+                r"(?:19|20)\d{2}|\d{3,4}p|4k|bluray|web-?dl|webrip|"
+                r"x264|x265|h264|h265|hevc|avc",
+                lowered[:last_index],
+            ):
+                return label
+            continue
+        return label
     return None
 
 
@@ -716,7 +855,15 @@ def _resolution_of(text: str) -> str | None:
 def _source_of(text: str) -> tuple[str | None, str | None]:
     lowered = str(text or "").lower()
     for token, label in SOURCE_LABELS:
-        if token in lowered:
+        if "-" in token or len(token) > 4:
+            # Compound/hyphenated tokens and longer service names are unlikely to
+            # appear inside real title words, so a substring search is safe.
+            if token in lowered:
+                return label, token
+            continue
+        # Short bare tokens such as "web" must match as whole words; otherwise
+        # titles like "Charlotte Web" are mislabelled as WEB releases.
+        if re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", lowered):
             return label, token
     return None, None
 

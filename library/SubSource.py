@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import zipfile
 from contextlib import suppress
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
-from library.subtitle_utils import SubtitleUtils
+from library.subtitle_utils import SubtitleUtils, report_existing_subtitle
 
 # Map ISO-639-1 codes used elsewhere in this project to SubSource's full language names.
 # SubSource filters by full name (e.g. "english"), not by code ("en").
@@ -170,6 +171,41 @@ class SubSource:
         response.raise_for_status()
         return response
 
+    def health(self):
+        """Lightweight reachability probe for the SubSource API.
+
+        Returns a dict so the TUI adapter can build a HealthResult without
+        importing TUI types into the library layer.
+        """
+        if not self.api_key:
+            return {
+                "reachable": False,
+                "authenticated": False,
+                "latency_ms": None,
+                "reason": "API key not configured",
+            }
+
+        started = time.perf_counter()
+        try:
+            self._request(
+                "/movies/search",
+                {"searchType": "text", "q": "test", "limit": 1},
+            )
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return {
+                "reachable": True,
+                "authenticated": True,
+                "latency_ms": latency_ms,
+                "reason": f"reachable ({latency_ms} ms)",
+            }
+        except requests.exceptions.RequestException as exc:
+            return {
+                "reachable": False,
+                "authenticated": False,
+                "latency_ms": None,
+                "reason": f"unreachable: {exc}",
+            }
+
     def _parse_list(self, data):
         """Return (subtitles, movies). Handles the {success, data, error} shape."""
         if not isinstance(data, dict):
@@ -312,9 +348,10 @@ class SubSource:
         title then keep only the season matching the filename (falling back to all
         seasons if we can't find the exact one).
         """
-        # Try a title (series/film name) search first.
-        series_match = re.search(r"(.+?)(?:\s-\sS\d{2}E\d{2}|\s-\s\d{4})", media_name)
-        query = series_match.group(1) if series_match else media_name
+        # Try a clean title (series/film name) search first. Dotted scene names
+        # never matched the old " - " regex, so the full noisy filename was used.
+        clean_titles = self.subtitle_utils._title_hypotheses(media_name)
+        query = clean_titles[0] if clean_titles else media_name
 
         movies = self.movie_search(query=query, search_type="text", limit=30)
 
@@ -567,50 +604,41 @@ class SubSource:
                         matching_subtitle = sf
                         break
 
+            if matching_subtitle is None and not is_movie:
+                return None
+
             selected_subtitle_path = None
-            for sf in sub_files:
-                try:
-                    decoded_content = self._decode_bytes(archive.read(sf))
+            try:
+                sf = matching_subtitle or sub_files[0]
+                decoded_content = self._decode_bytes(archive.read(sf))
 
-                    if sf == matching_subtitle:
-                        ext = ".ass" if sf.lower().endswith(".ass") else ".srt"
-                        target_filename = (
-                            subtitle_filename if ext == ".ass" else fallback_filename
-                        )
-                        selected_subtitle_path = self._output_path(
-                            video_input_path,
-                            target_filename,
-                        )
-                    else:
-                        original_name = Path(sf).stem
-                        extension = Path(sf).suffix
-                        target_filename = (
-                            f"{original_name}.{language_choice}{extension}"
-                            if language_choice
-                            else f"{original_name}{extension}"
-                        )
+                ext = Path(sf).suffix.lower()
+                if ext not in (".ass", ".ssa", ".srt", ".vtt"):
+                    ext = ".srt"
+                target_filename = (
+                    f"{video_input_path.stem}.{language_choice}{ext}"
+                    if language_choice
+                    else f"{video_input_path.stem}{ext}"
+                )
+                selected_subtitle_path = self._output_path(
+                    video_input_path,
+                    target_filename,
+                )
 
-                    target_path = self._output_path(
-                        video_input_path,
-                        target_filename,
-                    )
-                    if self.output_directory is not None and target_path.exists():
-                        if target_path == selected_subtitle_path:
-                            selected_subtitle_path = None
-                        self.console.print(
-                            f"[bold red]Subtitle already exists: {target_path}[/]"
-                        )
-                        continue
-                    with open(target_path, "w", encoding="utf-8") as target:
-                        target.write(decoded_content)
-                    self.console.print(
-                        f"[green]Subtitle extracted and saved as: "
-                        f"{target_filename}[/green]"
-                    )
-                except Exception as e:
-                    self.console.print(
-                        f"[bold red]Error processing subtitle file {sf}: {e}[/]"
-                    )
+                if report_existing_subtitle(
+                    selected_subtitle_path, self.console
+                ):
+                    return None
+                with open(selected_subtitle_path, "w", encoding="utf-8") as target:
+                    target.write(decoded_content)
+                self.console.print(
+                    f"[green]Subtitle extracted and saved as: "
+                    f"{target_filename}[/green]"
+                )
+            except Exception as e:
+                self.console.print(
+                    f"[bold red]Error processing subtitle file {sf}: {e}[/]"
+                )
         finally:
             if archive is not None:
                 with suppress(Exception):

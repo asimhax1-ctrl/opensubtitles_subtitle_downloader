@@ -99,3 +99,61 @@ def test_sync_subs_audio_finds_canonical_launcher_beside_python(
     )
 
     assert calls[0][0][0] == str(launcher)
+
+
+def test_iter_process_output_splits_carriage_return_progress():
+    from library.sync_subtitles import _iter_process_output
+    import io
+
+    stream = io.StringIO(
+        "line one\r 10%...\r 45%...\r\nfinal\rpartial-no-newline"
+    )
+    assert list(_iter_process_output(stream)) == [
+        "line one",
+        " 10%...",
+        " 45%...",
+        "final",
+        "partial-no-newline",
+    ]
+
+
+def test_sync_cancel_event_terminates_the_subprocess(tmp_path, monkeypatch):
+    import threading
+
+    from library import sync_subtitles
+
+    slow_stub = tmp_path / "slow_ffs.py"
+    slow_stub.write_text(
+        "import time\n"
+        "print('progress 0%')\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    launcher = tmp_path / "ffs.cmd"
+    launcher.write_text(
+        f'@echo off\r\n"{__import__("sys").executable}" "{slow_stub}"\r\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sync_subtitles, "_find_ffsubsync", lambda: str(launcher))
+
+    cancel = threading.Event()
+    lines = []
+
+    import threading as _t
+
+    def cancel_soon():
+        _t.Event().wait(0.5)
+        cancel.set()
+
+    _t.Thread(target=cancel_soon, daemon=True).start()
+
+    import pytest as _pytest
+
+    with _pytest.raises(Exception) as excinfo:
+        sync_subtitles.sync_subs_audio(
+            tmp_path / "movie.mkv",
+            tmp_path / "movie.ar.srt",
+            on_output=lines.append,
+            cancel_event=cancel,
+        )
+    assert "cancelled" in str(excinfo.value).lower()

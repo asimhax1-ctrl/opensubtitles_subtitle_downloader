@@ -75,6 +75,10 @@ def public_url(url: str | None) -> str | None:
     if not url:
         return None
     parsed = urlsplit(url)
+    # A public URL must be absolute so it is actually shareable; relative paths
+    # (e.g. SubSource's /subtitle/...) cannot be copied usefully.
+    if not parsed.scheme or not parsed.netloc:
+        return None
     keys = {key.lower() for key, _ in parse_qsl(parsed.query)}
     return None if keys & SENSITIVE_QUERY_KEYS else url
 
@@ -167,8 +171,9 @@ class StandardProviderAdapter:
     provider: Provider
     language_aliases: Mapping[str, str] = {}
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, config: Any = None) -> None:
         self.client = client
+        self.config = config
 
     def search(self, request: SearchRequest) -> ProviderSearchResult:
         try:
@@ -196,7 +201,13 @@ class StandardProviderAdapter:
         )
 
     def health(self) -> HealthResult:
-        configured = bool(getattr(self.client, "api_key", True))
+        # Read configured state from the validated ProviderConfig when available;
+        # falling back to the client avoids breaking tests that construct adapters
+        # with a plain fake client.
+        if self.config is not None:
+            configured = bool(getattr(self.config, "configured", True))
+        else:
+            configured = bool(getattr(self.client, "api_key", True))
         checker = getattr(self.client, "health", None)
         if checker is None:
             return HealthResult(
@@ -212,10 +223,19 @@ class StandardProviderAdapter:
                 provider=self.provider,
                 configured=configured,
                 reachable=False,
-                reason=redact_secrets(exc),
+                reason=redact_secrets(str(exc)),
             )
         if isinstance(value, HealthResult):
             return value
+        if isinstance(value, dict):
+            return HealthResult(
+                provider=self.provider,
+                configured=configured,
+                reachable=bool(value.get("reachable", False)),
+                authenticated=value.get("authenticated"),
+                latency_ms=value.get("latency_ms"),
+                reason=value.get("reason"),
+            )
         return HealthResult(
             provider=self.provider,
             configured=configured,

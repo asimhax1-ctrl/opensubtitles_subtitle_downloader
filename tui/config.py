@@ -29,6 +29,7 @@ SUPPORTED_GENERAL_FIELDS = {
     "no_tui",
     "hearing_impaired",
     "show_ai_translated",
+    "verify_subtitles",
 }
 SECRET_FIELDS = {"username", "password", "api_key", "user_agent"}
 
@@ -54,6 +55,10 @@ class GeneralConfig:
     # Opt in to downloading the best fallback candidate automatically. Default off:
     # nothing is downloaded in a language the user did not ask for.
     auto_fallback_download: bool = False
+    # Verify staged subtitles (format, language script, duration coverage) before
+    # they are saved beside the media. Default on: a bad subtitle is reported
+    # instead of written.
+    verify_subtitles: bool = True
     media_extensions_include: list[str] = field(default_factory=list)
     media_extensions_exclude: list[str] = field(default_factory=list)
 
@@ -193,6 +198,9 @@ class ConfigRepository:
             ).strip().lower(),
             auto_fallback_download=bool(
                 general_raw.get("auto_fallback_download", False)
+            ),
+            verify_subtitles=bool(
+                general_raw.get("verify_subtitles", True)
             ),
             media_extensions_include=[
                 str(value)

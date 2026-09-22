@@ -8,9 +8,19 @@ def read_file(_file_path):
     :param _file_path: path to a certain file
     :return: opened file
     """
-    with open(_file_path, encoding="utf8") as _file_to_read:
-        _file = _file_to_read.read()
-    return _file
+    data = Path(_file_path).read_bytes()
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    for encoding in ("utf-16", "cp1256", "cp1252", "iso-8859-1", "latin1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
 
 
 def save_file(_file_path, _content):
@@ -43,11 +53,14 @@ def clean_ads_regex(_subtitle_file_path, _ads_to_remove):
     _ads_to_remove = [ad for ad in _ads_to_remove if ad]
 
     # create a dynamic regex based on the start of each ad.
-    regex_list = []
-    for _ad in _ads_to_remove:
-        regex_list.append(f"(^{_ad}.*$)")
+    # Ads are treated as literal text so user-supplied regex metacharacters cannot
+    # crash the cleaner or cause catastrophic backtracking.
+    regex_list = [re.escape(_ad) + r".*$" for _ad in _ads_to_remove if _ad]
 
-    join_ads_regex = "|".join(map(re.escape, regex_list)).replace("\\", "")
+    if not regex_list:
+        return
+
+    join_ads_regex = "|".join(regex_list)
     _file_content = re.sub(
         pattern=join_ads_regex,
         repl="",

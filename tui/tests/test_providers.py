@@ -1,4 +1,6 @@
+import io
 import re
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -13,8 +15,8 @@ from tui.config import (
     GeneralConfig,
     ProviderConfig,
 )
-from tui.domain import Provider, SearchRequest, normalize_subtitle_format
-from tui.providers.base import candidate_from_standardized
+from tui.domain import HealthResult, Provider, SearchRequest, normalize_subtitle_format
+from tui.providers.base import candidate_from_standardized, public_url
 from tui.providers.factory import create_adapters
 from tui.providers.opensubtitles import OpenSubtitlesAdapter
 from tui.providers.subdl import SubDLAdapter
@@ -182,6 +184,214 @@ def test_missing_provider_id_gets_stable_source_scoped_fingerprint():
     assert first.candidates[0].key.startswith("opensubtitles:fingerprint-")
 
 
+class HealthyClient:
+    def __init__(self, value):
+        self.value = value
+
+    def health(self):
+        return self.value
+
+
+class UnhealthyClient:
+    def health(self):
+        raise OSError("probe failed")
+
+
+def test_adapter_health_maps_dict_result_to_health_result():
+    adapter = OpenSubtitlesAdapter(
+        client=HealthyClient(
+            {
+                "reachable": True,
+                "authenticated": True,
+                "latency_ms": 42,
+                "reason": "ok",
+            }
+        )
+    )
+
+    result = adapter.health()
+
+    assert result.reachable is True
+    assert result.authenticated is True
+    assert result.latency_ms == 42
+    assert result.reason == "ok"
+
+
+def test_adapter_health_without_probe_reports_unsupported():
+    adapter = OpenSubtitlesAdapter(client=FakeClient([]))
+
+    result = adapter.health()
+
+    assert result.configured is True
+    assert result.reachable is False
+    assert "unsupported" in (result.reason or "").lower()
+
+
+def test_adapter_health_uses_config_for_configured_state():
+    config = ProviderConfig(provider=Provider.SUBDL, values={})
+    adapter = SubDLAdapter(client=HealthyClient({"reachable": True}), config=config)
+
+    result = adapter.health()
+
+    assert result.configured is False
+    assert result.reachable is True
+
+
+def test_adapter_health_redacts_exception_message():
+    adapter = SubSourceAdapter(client=UnhealthyClient())
+
+    result = adapter.health()
+
+    assert result.reachable is False
+    assert "probe failed" in (result.reason or "")
+
+
+def test_subsource_relative_link_becomes_absolute_public_url():
+    raw = {
+        "subtitleId": 99,
+        "releaseInfo": ["Movie WEB"],
+        "language": "english",
+        "link": "/subtitle/movie-2026/english/99",
+        "downloads": 1,
+        "contributors": [],
+    }
+
+    row = SubtitleUtils().standardize_subtitle_object(raw, backend="subsource")
+    candidate = candidate_from_standardized(Provider.SUBSOURCE, row)
+
+    assert candidate.public_url == "https://subsource.net/subtitle/movie-2026/english/99"
+
+
+def test_public_url_rejects_relative_and_secret_urls():
+    assert public_url("https://example.test/file.srt") == "https://example.test/file.srt"
+    assert public_url("/subtitle/123") is None
+    assert public_url("subtitle/123") is None
+    assert public_url("https://example.test/file.srt?api_key=secret") is None
+
+
+class FakeZipResponse:
+    def __init__(self, content):
+        self._content = content
+
+    def iter_content(self, chunk_size):
+        for i in range(0, len(self._content), chunk_size):
+            yield self._content[i : i + chunk_size]
+
+    def raise_for_status(self):
+        return None
+
+
+def _build_zip(*members: tuple[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in members:
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_subsource_preserves_ssa_and_vtt_extensions(tmp_path, monkeypatch):
+    client = object.__new__(SubSource)
+    client.api_key = "key"
+    client.api_base_url = "https://api.subsource.net/api/v1"
+    client.subtitle_utils = SubtitleUtils()
+    client.console = QuietConsole()
+    client.output_directory = None
+
+    video = tmp_path / "Movie.2024.1080p.mkv"
+    video.write_bytes(b"x")
+
+    archive_bytes = _build_zip(
+        ("Movie.2024.1080p.ssa", b"ssa content"),
+        ("Movie.2024.1080p.vtt", b"vtt content"),
+    )
+    monkeypatch.setattr(
+        client, "_get_raw", lambda _url: FakeZipResponse(archive_bytes)
+    )
+
+    subtitle = {"id": "123"}
+    result = client.download_single_subtitle(subtitle, video, "ar")
+
+    assert result is not None
+    assert Path(result).suffix in (".ssa", ".vtt")
+    # The member selected for a movie is the first one in the archive.
+    assert Path(result).read_bytes() in (b"ssa content", b"vtt content")
+
+
+def test_subdl_zip_extracts_only_the_requested_episode(tmp_path, monkeypatch):
+    """A season pack must not dump every episode beside the media."""
+    import library.SubDL as subdl_module
+
+    client = object.__new__(subdl_module.SubDL)
+    client.output_directory = None
+    client.console = QuietConsole()
+    client.subtitle_utils = SubtitleUtils()
+    client.download_base_url = "https://example.test"
+
+    video = tmp_path / "Show.S01E02.1080p.mkv"
+    video.write_bytes(b"x")
+
+    archive_bytes = _build_zip(
+        ("Show.S01E01.srt", b"episode one"),
+        ("Show.S01E02.srt", b"episode two"),
+        ("Show.S01E03.srt", b"episode three"),
+    )
+    monkeypatch.setattr(
+        subdl_module.requests, "get", lambda *a, **k: FakeZipResponse(archive_bytes)
+    )
+
+    result = subdl_module.SubDL._download_zip(
+        client,
+        "https://example.test/pack.zip",
+        video,
+        "en",
+        1,
+        2,
+        False,
+    )
+
+    assert result is not None
+    assert result.read_text(encoding="utf-8") == "episode two"
+    assert sorted(p.name for p in video.parent.glob("*.srt")) == [
+        "Show.S01E02.1080p.en.srt"
+    ]
+
+
+def test_subsource_archive_extracts_only_the_requested_episode(tmp_path, monkeypatch):
+    """A season pack must not dump every episode beside the media."""
+    client = object.__new__(SubSource)
+    client.api_key = "key"
+    client.api_base_url = "https://api.subsource.net/api/v1"
+    client.subtitle_utils = SubtitleUtils()
+    client.console = QuietConsole()
+    client.output_directory = None
+    client._download_url_for = lambda _subtitle_id: "https://example.test/pack.zip"
+
+    video = tmp_path / "Show.S01E02.1080p.mkv"
+    video.write_bytes(b"x")
+
+    archive_bytes = _build_zip(
+        ("Show.S01E01.srt", b"episode one"),
+        ("Show.S01E02.srt", b"episode two"),
+        ("Show.S01E03.srt", b"episode three"),
+    )
+    monkeypatch.setattr(client, "_get_raw", lambda _url: FakeZipResponse(archive_bytes))
+
+    result = client._download_archive(
+        {"id": "123"},
+        video,
+        "en",
+        1,
+        2,
+        False,
+    )
+
+    assert result is not None
+    assert result.read_text(encoding="utf-8") == "episode two"
+    assert sorted(p.name for p in video.parent.glob("*.srt")) == [
+        "Show.S01E02.1080p.en.srt"
+    ]
+
+
 def test_opensubtitles_candidates_add_hash_and_filename_results(tmp_path):
     media = tmp_path / "Dune - Prophecy (2024) - S01E01.mkv"
     media.touch()
@@ -192,8 +402,11 @@ def test_opensubtitles_candidates_add_hash_and_filename_results(tmp_path):
         {
             "hashFile": staticmethod(lambda _path: "movie-hash"),
             "normalize_media_name": staticmethod(SubtitleUtils.normalize_media_name),
+            "_title_hypotheses": staticmethod(
+                lambda _name, **kwargs: ["dune prophecy"]
+            ),
             "get_alternate_names": staticmethod(
-                lambda _name: ["Dune Prophecy S01E01", "Dune.Prophecy.1x01"]
+                lambda _name: ["dune prophecy s01e01", "dune.prophecy.1x01"]
             ),
         },
     )()
@@ -226,9 +439,9 @@ def test_opensubtitles_candidates_add_hash_and_filename_results(tmp_path):
     assert calls[0] == ("movie-hash", "", "en")
     assert [call[1] for call in calls[1:]] == [
         media.stem,
-        "Dune - Prophecy (2024)",
-        "Dune Prophecy S01E01",
-        "Dune.Prophecy.1x01",
+        "dune prophecy",
+        "dune prophecy s01e01",
+        "dune.prophecy.1x01",
     ]
     assert all(call[0] == "" for call in calls[1:])
     assert len(results) == 6
@@ -246,6 +459,9 @@ def test_opensubtitles_search_queries_drop_apostrophes(tmp_path):
         {
             "hashFile": staticmethod(lambda _path: ""),
             "normalize_media_name": staticmethod(SubtitleUtils.normalize_media_name),
+            "_title_hypotheses": staticmethod(
+                lambda _name, **kwargs: ["widows bay"]
+            ),
             "get_alternate_names": staticmethod(lambda _name: []),
         },
     )()
@@ -261,7 +477,7 @@ def test_opensubtitles_search_queries_drop_apostrophes(tmp_path):
     client.search_candidates(media, "en", media.stem)
 
     assert queries[0] == "Widows Bay (2026) - S01E01 - - Welcome"
-    assert "Widows Bay (2026)" in queries
+    assert "widows bay" in queries
     assert all("'" not in name for name in queries)
 
 
@@ -293,7 +509,7 @@ def test_subdl_search_queries_drop_apostrophes(tmp_path):
 
     client._gather_candidates(media, "en")
 
-    assert "Widows Bay (2026)" in queries
+    assert "widows bay" in queries
     assert all("'" not in name for name in queries)
 
 
@@ -308,10 +524,9 @@ def test_subsource_search_queries_drop_apostrophes(tmp_path):
 
     client._gather_candidates(media, "en")
 
-    # The primary query for the filename, with the apostrophe dropped. When nothing
-    # resolves, the alternate-name fallback may add further variant queries; what
-    # this test guards is the apostrophe handling on every one of them.
-    assert queries[0] == "Widows Bay (2026)"
+    # The primary query is now the clean title, with the apostrophe dropped. When
+    # nothing resolves, the alternate-name fallback may add further variants.
+    assert queries[0] == "widows bay"
     assert all("'" not in name for name in queries)
 
 
@@ -551,7 +766,7 @@ def test_get_alternate_names_generates_variants_for_a_movie():
     names = SubtitleUtils().get_alternate_names(MOVIE_FILENAME)
 
     assert names
-    assert any("Pitt" in name for name in names)
+    assert any("pitt" in name for name in names)
 
 
 def test_get_alternate_names_movie_variants_include_the_year():
@@ -563,9 +778,9 @@ def test_get_alternate_names_movie_variants_include_the_year():
 def test_get_alternate_names_keeps_the_original_title_as_a_variant():
     names = SubtitleUtils().get_alternate_names(MOVIE_FILENAME)
 
-    # The filename's own title spelling leads the list: no article stripping, no
-    # folding, and no script split is allowed to displace it.
-    assert names[0].startswith("The.Pitt")
+    # Queries are built from clean title hypotheses, so the leading variant is the
+    # normalized title with technical tokens removed.
+    assert names[0].startswith("the pitt")
 
 
 def test_get_alternate_names_still_handles_episodes():
@@ -620,8 +835,10 @@ def test_mixed_script_stem_produces_one_variant_per_script():
         "Al-Hayba" in variant and not _has_arabic(variant) for variant in variants
     )
     assert names
-    assert any("الهيبة" in name for name in names)
-    assert any("Al-Hayba" in name or "Al Hayba" in name for name in names)
+    # fold_arabic normalizes teh marbuta (ة) to heh (ه), so the searchable
+    # alternate names contain "الهيبه" rather than the original "الهيبة".
+    assert any("الهيبه" in name for name in names)
+    assert any("al hayba" in name or "al-hayba" in name for name in names)
 
 
 # --- Format detection at the provider boundary ----------------------------
@@ -877,3 +1094,117 @@ def test_subdl_zip_extracts_an_srt_member_as_srt(tmp_path, monkeypatch):
 
     assert written is not None
     assert written.name == "Movie.2026.ar.srt"
+
+
+def _opensubtitles_client():
+    client = object.__new__(OpenSubtitles)
+    client.username = "user"
+    client.password = "pass"
+    client.api_key = "key"
+    client.user_agent = "tests"
+    client.token = "stale-token"
+    client.console = QuietConsole()
+    client.subtitle_utils = SubtitleUtils()
+    return client
+
+
+def _download_selection(file_id="123"):
+    return {"attributes": {"files": [{"file_id": file_id}]}}
+
+
+def test_opensubtitles_download_link_missing_file_id_names_the_candidate():
+    client = _opensubtitles_client()
+
+    with pytest.raises(RuntimeError, match="no usable file_id"):
+        client.get_download_link({"attributes": {"files": []}})
+
+
+def test_opensubtitles_download_link_quota_error_is_explicit(monkeypatch):
+    import library.OpenSubtitles as os_module
+
+    client = _opensubtitles_client()
+
+    class QuotaResponse:
+        status_code = 429
+        text = "Too many requests"
+
+        def raise_for_status(self):
+            raise os_module.requests.exceptions.HTTPError(
+                "429 Client Error", response=self
+            )
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(
+        os_module.requests, "post", lambda *a, **k: QuotaResponse()
+    )
+
+    with pytest.raises(RuntimeError, match="download limit reached"):
+        client.get_download_link(_download_selection())
+
+
+def test_opensubtitles_download_link_refreshes_token_once_after_401(monkeypatch):
+    import library.OpenSubtitles as os_module
+
+    client = _opensubtitles_client()
+    calls = []
+
+    class UnauthorizedResponse:
+        status_code = 401
+        text = "Unauthorized"
+
+        def raise_for_status(self):
+            raise os_module.requests.exceptions.HTTPError(
+                "401 Client Error", response=self
+            )
+
+        def json(self):
+            return {}
+
+    class LinkResponse:
+        status_code = 200
+        text = ""
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"link": "https://example.test/subtitle.srt"}
+
+    def fake_post(*args, **kwargs):
+        calls.append(kwargs.get("headers", {}).get("Authorization"))
+        return UnauthorizedResponse() if len(calls) == 1 else LinkResponse()
+
+    monkeypatch.setattr(os_module.requests, "post", fake_post)
+    monkeypatch.setattr(client, "_fresh_login", lambda: "fresh-token")
+
+    assert client.get_download_link(_download_selection()) == (
+        "https://example.test/subtitle.srt"
+    )
+    assert calls == ["Bearer stale-token", "Bearer fresh-token"]
+
+
+def test_opensubtitles_adapter_download_error_carries_guidance(tmp_path):
+    from tui.domain import DownloadResult
+
+    client = _opensubtitles_client()
+    client.get_download_link = lambda _selected: None
+    adapter = OpenSubtitlesAdapter(client)
+    candidate = candidate_from_standardized(
+        Provider.OPENSUBTITLES,
+        {
+            "id": "9",
+            "attributes": {
+                "release": "Amadeus 1984",
+                "language": "ar",
+                "download_count": 3,
+            },
+        },
+    )
+
+    result: DownloadResult = adapter.download(candidate, tmp_path / "Amadeus.mkv")
+
+    assert result.subtitle_path is None
+    assert result.error is not None
+    assert "All providers" in result.error

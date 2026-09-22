@@ -18,6 +18,7 @@ from tui.domain import (
     SUBTITLE_FORMATS,
     normalize_subtitle_format,
 )
+from library.subtitle_verifier import SubtitleVerifier
 from tui.providers.base import ProviderAdapter
 
 # SSA-specific marker first: SSA files also carry "[Script Info]", so testing the
@@ -51,12 +52,14 @@ class SubtitleCleaner:
         self,
         subtitle_path: Path,
         ads_path: Path | None = None,
+        ads_separator: str = ",",
     ) -> bool:
         from library.subtitle_utils import SubtitleUtils
 
         return SubtitleUtils().clean_subtitles_strict(
             subtitle_path,
             ads_path=ads_path,
+            ads_separator=ads_separator,
         )
 
 
@@ -66,6 +69,7 @@ class SubtitleSynchronizer:
         media_path: Path,
         subtitle_path: Path,
         on_output: Callable[[str], None] | None = None,
+        cancel_event=None,
     ) -> bool:
         from library.subtitle_utils import SubtitleUtils
 
@@ -73,6 +77,7 @@ class SubtitleSynchronizer:
             media_path,
             subtitle_path,
             on_output=on_output,
+            cancel_event=cancel_event,
         )
 
 
@@ -84,6 +89,7 @@ class JobCoordinator:
         cleaner: Any | None = None,
         synchronizer: Any | None = None,
         output_directory: str | Path | None = None,
+        verifier: SubtitleVerifier | None = None,
     ) -> None:
         self.adapters = adapters
         self.cleaner = cleaner or SubtitleCleaner()
@@ -91,6 +97,7 @@ class JobCoordinator:
         self.output_directory = (
             Path(output_directory) if output_directory is not None else None
         )
+        self.verifier = verifier
 
     def download(
         self,
@@ -143,6 +150,7 @@ class JobCoordinator:
                 media,
                 destination,
                 overwrite,
+                self.verifier,
             )
         except OSError as exc:
             return DownloadResult(
@@ -158,6 +166,7 @@ class JobCoordinator:
         media: Path,
         destination: Path,
         overwrite: bool,
+        verifier: SubtitleVerifier | None = None,
     ) -> DownloadResult:
         with TemporaryDirectory(
             prefix=".subtitle-download-",
@@ -197,6 +206,17 @@ class JobCoordinator:
                     media_path=media,
                     conflict_path=target,
                 )
+            if verifier is not None:
+                verification = verifier.verify(
+                    staged_path, media, candidate.language
+                )
+                if not verification.passed:
+                    return DownloadResult(
+                        provider=candidate.provider,
+                        media_path=media,
+                        error=verification.reason or "Subtitle verification failed",
+                        verification_failed=True,
+                    )
             os.replace(staged_path, target)
             return DownloadResult(
                 provider=candidate.provider,
@@ -212,7 +232,9 @@ class JobCoordinator:
         clean: bool,
         sync: bool,
         ads_path: Path | None = None,
+        ads_separator: str = ",",
         sync_output: Callable[[str], None] | None = None,
+        sync_cancel_event=None,
     ) -> PostProcessResult:
         result = PostProcessResult()
         if not download.succeeded or download.subtitle_path is None:
@@ -228,6 +250,7 @@ class JobCoordinator:
                 cleaned = self.cleaner.clean(
                     download.subtitle_path,
                     ads_path=ads_path,
+                    ads_separator=ads_separator,
                 )
                 if cleaned is not True:
                     raise RuntimeError("Cleaner did not report success")
@@ -240,6 +263,7 @@ class JobCoordinator:
                     download.media_path,
                     download.subtitle_path,
                     on_output=sync_output,
+                    cancel_event=sync_cancel_event,
                 )
                 if synced is not True:
                     raise RuntimeError("Synchronizer did not report success")

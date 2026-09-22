@@ -154,7 +154,10 @@ class Palette(ModalScreen):
         action = self._filtered[self._cursor]
         if keep_open:
             # Run without dismissing; the host app executes the action.
+            if action.run:
+                action.run(self.app)
             self._filtered = self.keymap.search("")
             self._cursor = 0
             self._render_rows()
+            return
         self.dismiss(action)

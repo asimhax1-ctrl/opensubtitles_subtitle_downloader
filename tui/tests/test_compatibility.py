@@ -51,6 +51,21 @@ def test_a_release_group_is_read_after_the_last_hyphen():
     assert parse_release_facets(MOVIE_MEDIA).group == "GROUP"
 
 
+def test_a_bare_web_token_in_a_title_is_not_erased():
+    # "web" on its own is not a release source; the title must keep the word.
+    facets = parse_release_facets("Charlotte Web 2006 1080p")
+
+    assert facets.source is None
+    assert "web" in facets.title
+
+
+def test_a_real_web_source_tag_is_still_removed_from_the_title():
+    facets = parse_release_facets("Amadeus.2006.1080p.WEB-DL")
+
+    assert facets.source == "WEB-DL"
+    assert facets.title == "amadeus"
+
+
 def test_a_file_extension_never_becomes_part_of_the_title():
     assert parse_release_facets("Amadeus (1984).mkv").title == "amadeus"
     assert parse_release_facets("Amadeus (1984).srt").title == "amadeus"
@@ -138,6 +153,30 @@ def test_an_exact_title_and_year_outrank_the_title_alone():
     without_year = compatibility("Amadeus 1080p BluRay x264-GROUP", MOVIE_MEDIA)
 
     assert with_year.percent > without_year.percent
+
+
+def test_group_differences_are_not_identity_conflicts():
+    # Different release groups for the same film must not hide the matching
+    # title/year/source evidence behind a Conflict block.
+    same_group = compatibility(MOVIE_MEDIA, MOVIE_MEDIA)
+    different_group = compatibility(
+        "Amadeus (1984) 1080p BluRay x264-OTHER", MOVIE_MEDIA
+    )
+
+    assert different_group.conflicts == ()
+    assert "+ exact title" in different_group.evidence_lines()
+    assert different_group.percent < same_group.percent
+
+
+def test_same_film_with_different_audio_lines_still_gets_exact_title():
+    media = "Movie.2020.1080p.WEB-DL.DDP5.1.x264-GRP"
+    subtitle = "Movie.2020.1080p.WEB-DL.AAC2.0.x264-GRP"
+
+    match = compatibility(subtitle, media)
+    subtitle_facets = parse_release_facets(subtitle)
+
+    assert "+ exact title" in match.evidence_lines()
+    assert subtitle_facets.codec == "H.264"
 
 
 def test_a_partial_title_outranks_an_unrelated_one():

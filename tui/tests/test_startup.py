@@ -101,6 +101,18 @@ def test_language_resolution_treats_whitespace_cli_value_as_absent():
     ) == ("fr", "config")
 
 
+def test_subtitle_downloader_reads_config_as_utf8(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "general:\n  default_language: مرحبا\n",
+        encoding="utf-8",
+    )
+
+    downloader = download_subs.SubtitleDownloader(str(config))
+
+    assert downloader.config["general"]["default_language"] == "مرحبا"
+
+
 def test_tui_entry_import_does_not_load_legacy_providers():
     completed = subprocess.run(
         [

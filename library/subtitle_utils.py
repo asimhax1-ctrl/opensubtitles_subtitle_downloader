@@ -21,6 +21,16 @@ CURRENT_DIR_PATH = os.path.dirname(os.path.realpath(__file__))
 TOKEN_STORAGE_FILE = os.path.join(CURRENT_DIR_PATH, "token.pkl")
 # ====================================================================
 
+
+def report_existing_subtitle(path: str | Path, console: Console) -> bool:
+    """Print a conflict message and return True when the subtitle path exists."""
+    target = Path(path)
+    if target.exists():
+        console.print(f"[bold red]Subtitle already exists: {target}[/]")
+        return True
+    return False
+
+
 # Release naming drops apostrophes entirely ("Widow's Bay" -> "Widows Bay"),
 # so they are removed rather than treated as token separators when matching
 # or building provider search queries.
@@ -36,6 +46,17 @@ ARABIC_MARKS_RE = re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
 TATWEEL_RE = re.compile(r"\u0640")
 ALEF_FORMS_RE = re.compile(r"[\u0622\u0623\u0625\u0671]")
 ARABIC_DIGITS_RE = re.compile(r"[\u0660-\u0669\u06F0-\u06F9]")
+
+def _abs_subsource_url(link: str) -> str:
+    """Return an absolute SubSource URL, expanding a relative path if needed."""
+    if not link:
+        return link
+    link = link.split("?")[0]
+    if link.startswith("http://") or link.startswith("https://"):
+        return link
+    base = "https://subsource.net"
+    return base + (link if link.startswith("/") else f"/{link}")
+
 
 # The characters _normalize_match_text keeps. Everything outside this class becomes a
 # separator, so the Arabic ranges must be listed explicitly -- otherwise the folding
@@ -214,9 +235,11 @@ class SubtitleUtils:
                             "ai_translated": prod == "machine",
                             "machine_translated": prod == "machine",
                             "moviehash_match": False,
-                            # url is the human-readable link; the real download URL is
-                            # built from the id by SubSource._download_url_for.
-                            "url": subtitle.get("link", ""),
+                    # url is the human-readable link; the real download URL is
+                    # built from the id by SubSource._download_url_for. Expand a
+                    # relative path so the TUI "copy public URL" feature copies an
+                    # absolute, shareable URL.
+                    "url": _abs_subsource_url(subtitle.get("link", "")),
                             "hi": bool(subtitle.get("hearingImpaired")),
                             "full_season": False,
                             "author": author,
@@ -267,10 +290,11 @@ class SubtitleUtils:
             self.console.print(f"[bold red]Error reading token: {e}[/]")
             return False
 
-    def clean_subtitles_strict(self, subtitle_path, ads_path=None):
+    def clean_subtitles_strict(self, subtitle_path, ads_path=None, ads_separator=","):
         return clean_subtitles.clean_ads(
             subtitle_path,
             ads_file_path=ads_path,
+            ads_separator=ads_separator,
         )
 
     def clean_subtitles(self, subtitle_path, ads_path=None):
@@ -280,11 +304,14 @@ class SubtitleUtils:
             self.console.print(f"[bold red]Error cleaning subtitles: {e}[/]")
             return False
 
-    def sync_subtitles_strict(self, media_path, subtitle_path, on_output=None):
+    def sync_subtitles_strict(
+        self, media_path, subtitle_path, on_output=None, cancel_event=None
+    ):
         return sync_subtitles.sync_subs_audio(
             media_path,
             subtitle_path,
             on_output=on_output,
+            cancel_event=cancel_event,
         )
 
     def sync_subtitles(self, media_path, subtitle_path):
@@ -304,20 +331,23 @@ class SubtitleUtils:
 
             # Iterate through the list of dictionaries
             for item in input_list:
-                item_id = item["id"]
+                item_id = item.get("id")
+                if item_id is None:
+                    continue
 
                 # Check if the 'id' is not already in the set of unique_ids
                 if item_id not in unique_ids:
                     unique_ids.add(item_id)
                     unique_data.append(item)
 
-            sorted_list = sorted(
-                unique_data, key=lambda x: x["attributes"][key_to_sort_by], reverse=True
-            )
+            def _sort_key(x):
+                try:
+                    return x["attributes"][key_to_sort_by]
+                except (KeyError, TypeError):
+                    return 0
+
+            sorted_list = sorted(unique_data, key=_sort_key, reverse=True)
             return sorted_list
-        except (KeyError, TypeError) as e:
-            self.console.print(f"[bold red]Error sorting list of dictionaries: {e}[/]")
-            return []
         except Exception as e:
             self.console.print(f"[bold red]Unexpected error sorting list: {e}[/]")
             return []
@@ -338,7 +368,7 @@ class SubtitleUtils:
                     self.console.print(
                         f"[bold red]Error: File size error while generating hash for {media_path}[/]"
                     )
-                    return "SizeError"
+                    return None
 
                 buf = f.read(65536)
                 longlongs = struct.unpack(fmt, buf)
@@ -357,7 +387,7 @@ class SubtitleUtils:
             self.console.print(
                 f"[bold red]Error: I/O error while generating hash for {media_path}: {e}[/]"
             )
-            return "IOError"
+            return None
         except Exception as e:
             self.console.print(
                 f"[bold red]Unexpected error generating hash for {media_path}: {e}[/]"
@@ -365,54 +395,31 @@ class SubtitleUtils:
             return None
 
     def extract_season_and_episode(self, media_name):
-        """Extract season and episode numbers from media name using multiple formats"""
+        """Extract season and episode numbers from media name.
+
+        Delegates to the same parser used for release-name scoring so the two
+        can never disagree. Daily/ aired dates are treated as episode identity
+        by air date and return (None, None) so the caller falls back to the
+        release name rather than inventing a season/episode pair.
+        """
         if not media_name:
             return None, None
 
-        # Normalize input string
-        media_name = media_name.replace("_", " ").replace(".", " ")
+        season, episode, confidence = self._episode_evidence(
+            str(media_name),
+            allow_bare=True,
+        )
+        if confidence != "none":
+            return season, episode
 
-        patterns = [
-            # Standard formats
-            r"[Ss](\d{1,2})[Ee](\d{1,2})",  # S01E02, s1e2
-            r"[Ss](\d{1,2})\s*-\s*[Ee](\d{1,2})",  # S01-E02
-            r"(\d{1,2})x(\d{1,2})",  # 1x02
-            r"(?:Episode|Ep)\s*(\d{1,2})",  # Episode 2, Ep 2 (implies S1)
-            r"[Ee](\d{1,2})",  # E02 (implies S1)
-            r"[Ee][Pp](\d{1,2})",  # EP02 (implies S1)
-            # More specific formats
-            r"\s-\s*[Ss](\d{1,2})[Ee](\d{1,2})",  # - S01E02
-            r"[Ss]eason\s*(\d{1,2})\s*[Ee]pisode\s*(\d{1,2})",  # Season 1 Episode 2
-            r"[Ss](\d{1,2})\s*[Ee]p\s*(\d{1,2})",  # S01 Ep 02
-            # Date-based formats for daily shows
-            r"(\d{4})\.(\d{2}\.\d{2})",  # 2024.01.02
-            r"(\d{4})-(\d{2}-\d{2})",  # 2024-01-02
-            # Special formats
-            r"Episode\s#(\d+)\.(\d+)",  # Episode #1.2
-            r"E(\d{1,2})",  # E1 (implies S1)
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, media_name, re.IGNORECASE)
+        # A season pack states a season and no episode ("Show.S01.1080p").
+        # This is a complete name, not a silent film, so preserve the season.
+        text = unicodedata.normalize("NFKC", str(media_name))
+        text = re.sub(r"[\u2010-\u2015\u2212]", "-", text)
+        for word in self._normalize_match_text(text).split():
+            match = re.match(r"^s(\d{1,2})$", word, re.IGNORECASE)
             if match:
-                groups = match.groups()
-
-                # Handle special cases
-                if len(groups) == 1:  # Single number patterns imply Season 1
-                    return 1, int(groups[0])
-
-                if len(groups) == 2:
-                    season = groups[0]
-                    episode = groups[1]
-
-                    # Handle date-based formats
-                    if len(season) == 4:  # Year-based format
-                        return 1, int(episode.replace(".", "").replace("-", ""))
-
-                    try:
-                        return int(season), int(episode)
-                    except (ValueError, TypeError):
-                        continue
+                return int(match.group(1)), None
 
         return None, None
 
@@ -433,6 +440,11 @@ class SubtitleUtils:
         text = KEEP_MATCH_CHARS_RE.sub(" ", text)
         return " ".join(text.lower().split())
 
+    # Daily/aired dates that should not be read as season/episode numbers.
+    DAILY_DATE_RE = re.compile(
+        r"\b(?:19|20)\d{2}[.\-](?:0[1-9]|1[0-2])[.\-](?:0[1-9]|[12]\d|3[01])\b"
+    )
+
     @staticmethod
     def _episode_evidence(media_name, *, allow_bare=False):
         """Return (season, episode, confidence) without forcing uncertain data."""
@@ -441,6 +453,8 @@ class SubtitleUtils:
 
         text = unicodedata.normalize("NFKC", str(media_name))
         text = re.sub(r"[\u2010-\u2015\u2212]", "-", text)
+        if SubtitleUtils.DAILY_DATE_RE.search(text):
+            return None, None, "none"
         explicit_patterns = (
             r"\b[Ss](\d{1,2})[\s._-]*[Ee](?:[Pp])?[\s._-]*(\d{1,3})\b",
             r"\b(\d{1,2})[xX](\d{1,3})\b",
@@ -682,59 +696,36 @@ class SubtitleUtils:
         return [latin, arabic]
 
     def get_alternate_names(self, media_name):
-        """Generate alternate name formats for the media"""
+        """Generate alternate name formats for the media.
+
+        Queries are built from clean title hypotheses so technical tokens
+        (1080p, WEB-DL, x264, group names) never reach the provider.
+        """
         try:
             if not media_name:
                 return None
 
-            # First get season/episode since we have robust parsing for that
             season, episode = self.extract_season_and_episode(media_name)
-
-            # Extract title and year, now knowing where season/episode info is
-            # Remove common episode/season patterns
-            clean_name = media_name
-
-            patterns_to_remove = [
-                r"[Ss]\d{1,2}[Ee]\d{1,2}",
-                r"[Ss]\d{1,2}\s*-\s*[Ee]\d{1,2}",
-                r"\d{1,2}x\d{1,2}",
-                r"(?:Episode|Ep)\s*\d{1,2}",
-                r"[Ee]\d{1,2}",
-                r"[Ee][Pp]\d{1,2}",
-            ]
-
-            for pattern in patterns_to_remove:
-                clean_name = re.sub(pattern, "", clean_name, flags=re.IGNORECASE)
-
-            # Extract year if present
-            year_match = re.search(r"\((\d{4})\)", clean_name)
-            year = year_match.group(1) if year_match else ""
-            if not year:
-                loose_year = re.search(r"\b((?:19|20)\d{2})\b", clean_name)
-                year = loose_year.group(1) if loose_year else ""
-            if year:
-                clean_name = re.sub(r"\s*\(\d{4}\)\s*", " ", clean_name)
-                clean_name = re.sub(rf"\b{year}\b", " ", clean_name)
-
-            # Clean up title
-            title = clean_name.strip().strip(".-_ ")
-            if not title:
+            year = self._year_of(media_name)
+            hypotheses = self._title_hypotheses(media_name, allow_bare=True)
+            if not hypotheses:
                 return None
 
             formats = []
-
-            # Movies have no episode number: title-only variants. Previously this
-            # returned None, so films received no alternate queries at all.
-            if not episode:
-                for variant in self._title_variants(title):
-                    formats.append(variant)
-                    if year:
-                        formats.append(f"{variant} {year}")
-                        formats.append(f"{variant} ({year})")
+            if episode is None:
+                for title in hypotheses:
+                    for variant in self._title_variants(title):
+                        formats.append(variant)
+                        if year:
+                            formats.append(f"{variant} {year}")
+                            formats.append(f"{variant} ({year})")
                 return list(dict.fromkeys(formats))
 
-            for variant in self._title_variants(title):
-                formats.extend(self._episode_formats(variant, year, season, episode))
+            for title in hypotheses:
+                for variant in self._title_variants(title):
+                    formats.extend(
+                        self._episode_formats(variant, year, season, episode)
+                    )
 
             return list(dict.fromkeys(formats))
         except Exception as e:
@@ -937,20 +928,17 @@ class SubtitleUtils:
 
     def sort_subtitle_list(self, subtitles_list, scores=None):
         try:
-            sorted_subs = sorted(
-                subtitles_list,
-                key=lambda x: (
-                    scores.get(x["id"], 0)
-                    if scores
-                    else x["attributes"]["download_count"]
-                ),
-                reverse=True,
-            )
+            def _sort_key(x):
+                if scores:
+                    return scores.get(x.get("id"), 0)
+                try:
+                    return x["attributes"]["download_count"]
+                except (KeyError, TypeError):
+                    return 0
+
+            sorted_subs = sorted(subtitles_list, key=_sort_key, reverse=True)
 
             return sorted_subs
-        except (KeyError, TypeError) as e:
-            self.console.print(f"[bold red]Error sorting subtitle list: {e}[/]")
-            return []
         except Exception as e:
             self.console.print(f"[bold red]Unexpected error sorting subtitles: {e}[/]")
             return []

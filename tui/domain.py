@@ -161,10 +161,54 @@ class DownloadResult:
     subtitle_path: Path | None = None
     error: str | None = None
     conflict_path: Path | None = None
+    # True when the failure is the verifier rejecting the downloaded subtitle
+    # (bad coverage, wrong language, corrupt format): the candidate was bad, not
+    # the request, so the caller may fall back to the next ranked candidate.
+    verification_failed: bool = False
 
     @property
     def succeeded(self) -> bool:
         return self.subtitle_path is not None and self.error is None
+
+
+# Substrings marking a download failure as account/quota-wide rather than
+# specific to the chosen candidate. Global failures must NOT trigger a walk
+# down the ranked list: every candidate would fail the same way and burn API
+# quota. Per-candidate failures (bad file_id, unreadable response, save error,
+# verification rejection) may advance to the next untried candidate.
+_GLOBAL_DOWNLOAD_FAILURE_MARKERS = (
+    "authentication failed",
+    "api key",
+    "login failed",
+    "not configured",
+    "download limit reached",
+    "quota",
+    "429",
+    "401",
+    "403",
+)
+
+
+def is_global_download_failure(error: str | None) -> bool:
+    """True when retrying another candidate cannot help (auth/quota/config)."""
+    if not error:
+        return False
+    lowered = error.lower()
+    return any(marker in lowered for marker in _GLOBAL_DOWNLOAD_FAILURE_MARKERS)
+
+
+def should_try_next_candidate(download: DownloadResult) -> bool:
+    """True when the failure blames the candidate, not the request.
+
+    Verification rejections always qualify. Other download errors qualify
+    unless they are global (auth/quota/config): a bad file_id or an unreadable
+    response for one row says nothing about the next row.
+    """
+    if download.succeeded or not download.error:
+        return False
+    if download.verification_failed:
+        return True
+    return not is_global_download_failure(download.error)
 
 
 @dataclass

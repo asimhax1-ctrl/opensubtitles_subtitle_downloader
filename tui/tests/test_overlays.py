@@ -144,6 +144,28 @@ def test_palette_filters_and_returns_action():
     assert result.id == "app.quit"
 
 
+def test_palette_ctrl_enter_runs_action_without_dismissing():
+    ran = []
+
+    async def run():
+        action = Action(
+            id="test.keep",
+            label="Keep Open Action",
+            category="test",
+            run=lambda app: ran.append(True),
+        )
+        app = SubsApp(config=HOST_CONFIG, media_paths=[], overrides={})
+        async with app.run_test() as pilot:
+            app.push_screen(Palette(Keymap([action])))
+            await pilot.pause()
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            assert isinstance(app.screen, Palette)
+
+    asyncio.run(run())
+    assert ran == [True]
+
+
 def test_keymap_actions_are_callable_and_searchable():
     actions = default_actions()
     assert all(callable(action.run) for action in actions)

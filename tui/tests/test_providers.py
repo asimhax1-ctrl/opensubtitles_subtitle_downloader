@@ -823,6 +823,27 @@ def test_get_alternate_names_still_handles_episodes():
     assert any("S01E01" in name for name in names)
 
 
+def test_get_alternate_names_handles_an_episode_without_a_season():
+    # A bare "E03" label is unambiguous episodic evidence; the variants must be
+    # honest season-less episode shapes, never a literal "None".
+    names = SubtitleUtils().get_alternate_names("Show.E03.1080p.HDTV.x264-GRP")
+
+    assert names
+    assert all("None" not in name for name in names)
+    assert any(name == "show E03" for name in names)
+
+
+def test_get_alternate_names_handles_a_season_less_episode_with_a_year():
+    # Regression: the year shapes formatted season with :02d, so a season-less
+    # episode with a year raised TypeError, the handler swallowed it, and the
+    # providers received no variants at all.
+    names = SubtitleUtils().get_alternate_names("Show.E03.2020.1080p.HDTV.x264-GRP")
+
+    assert names
+    assert all("None" not in name for name in names)
+    assert any("E03" in name and "2020" in name for name in names)
+
+
 def test_arabic_variant_is_additive_and_folded():
     # The trailing teh marbuta (U+0629) folds to heh (U+0647), so the folded
     # spelling is a genuinely different query string from the one on the filename.

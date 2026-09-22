@@ -742,7 +742,13 @@ class SubtitleUtils:
 
     @staticmethod
     def _episode_formats(title, year, season, episode):
-        """Every episode-shaped spelling of one already-varied title."""
+        """Every episode-shaped spelling of one already-varied title.
+
+        A season-less episode ("Show.E03") is honest about what is unknown: it
+        gets season-less E-shapes rather than a literal "None" season, and the
+        year shapes that require SxxEyy are skipped instead of crashing on
+        ``None:02d``.
+        """
         formats = []
         if season:
             formats.extend(
@@ -752,21 +758,28 @@ class SubtitleUtils:
                     f"{title} Episode #{season}.{episode:02d}",
                 ]
             )
-        if year:
+        if year and season:
             formats.extend(
                 [
                     f"{title} ({year}) - S{season:02d}E{episode:02d}",
                     f"{title} ({year}) {season}x{episode:02d}",
                 ]
             )
-        if season == 1:
+        if year and not season:
+            formats.append(f"{title} ({year}) E{episode:02d}")
+        if season == 1 or season is None:
             formats.extend(
                 [
                     f"{title} E{episode:02d}",
                     f"{title.lower().replace(' ', '.')}.E{episode:02d}",
                 ]
             )
-        formats.append(f"{title.lower().replace(' ', '-')}-episode-{season}-{episode}")
+        if season is None:
+            formats.append(f"{title.lower().replace(' ', '-')}-episode-{episode}")
+        else:
+            formats.append(
+                f"{title.lower().replace(' ', '-')}-episode-{season}-{episode}"
+            )
         return formats
 
     def normalize_score(self, score):

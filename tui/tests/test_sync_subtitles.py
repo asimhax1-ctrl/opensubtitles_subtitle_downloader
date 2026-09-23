@@ -94,6 +94,30 @@ def test_sync_subs_audio_streams_combined_ffsubsync_output(monkeypatch, tmp_path
     assert not output_path.exists()
 
 
+def test_sync_uses_media_audio_vad_without_forcing_an_embedded_stream(
+    monkeypatch, tmp_path
+):
+    media = tmp_path / "Arrival (2016) فيلم.mkv"
+    subtitle = _make_srt(tmp_path / "Arrival (2016) فيلم.ar.srt")
+    commands = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        assert command[command.index("--vad") + 1] == "webrtc"
+        assert "--reference-stream" not in command
+        assert "-map" not in command
+        assert command[1] == str(media.resolve())
+        Path(command[command.index("-o") + 1]).write_text(SYNCED_SRT, encoding="utf-8")
+
+    monkeypatch.setattr(sync_subtitles, "_find_ffsubsync", lambda: "ffs")
+    monkeypatch.setattr(sync_subtitles.subprocess, "run", fake_run)
+
+    assert sync_subtitles.sync_subs_audio(media, subtitle)
+    assert len(commands) == 1
+    assert subtitle.read_text(encoding="utf-8") == SYNCED_SRT
+    assert list(tmp_path.glob(".sync-*")) == []
+
+
 @pytest.mark.parametrize(
     "newline",
     ["\r\r\r\n", "\r\r\n", "\r\n", "\r"],

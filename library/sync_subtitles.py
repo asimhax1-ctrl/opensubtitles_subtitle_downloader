@@ -280,6 +280,8 @@ def sync_subs_audio(
             str(output_path),
             "--encoding",
             "utf-8",
+            "--vad",
+            "webrtc",
         ]
 
         if on_output is None:

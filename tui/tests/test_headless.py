@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -457,6 +458,57 @@ def test_sync_ask_skips_sync_and_emits_one_notice(tmp_path, application_config):
         "ads_separator": ",",
     }
     assert len([message for message in emitted if "sync" in message.lower()]) == 1
+
+
+@pytest.mark.parametrize(
+    ("sync_policy", "expected_sync"),
+    [("always", True), ("never", False)],
+)
+def test_headless_all_providers_uses_shared_auto_selector(
+    tmp_path,
+    application_config,
+    sync_policy,
+    expected_sync,
+):
+    media = tmp_path / "movie.mkv"
+    media.touch()
+    application_config.general.auto_selection = True
+    application_config.general.sync_audio_to_subs = sync_policy
+    chosen = candidate("content-quality-winner")
+    coordinator = FakeAllProvidersCoordinator([result(chosen)])
+    calls = []
+
+    class Selector:
+        def run(self, candidates, media_path, **kwargs):
+            calls.append((candidates, media_path, kwargs))
+            return SimpleNamespace(
+                candidate=chosen,
+                download=DownloadResult(
+                    provider=chosen.provider,
+                    media_path=media_path,
+                    subtitle_path=media.with_name("movie.ar.srt"),
+                ),
+                postprocess=PostProcessResult(),
+                provider_errors=(),
+                error=None,
+                decision=SimpleNamespace(manual_required=False, reason="selected"),
+            )
+
+    runner = HeadlessAllProvidersRunner(
+        application_config,
+        {Provider.OPENSUBTITLES: FakeAdapter()},
+        coordinator=coordinator,
+        jobs=FakeJobs(),
+        auto_selector=Selector(),
+        emit=lambda _message: None,
+    )
+
+    summary = runner.run([media], "ar")
+
+    assert summary.succeeded == 1
+    assert calls[0][0] == [chosen]
+    assert calls[0][1] == media
+    assert calls[0][2]["sync"] is expected_sync
 
 
 def test_postprocess_warnings_do_not_undo_success(tmp_path, application_config):

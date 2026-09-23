@@ -78,6 +78,13 @@ def default_actions() -> list[Action]:
             lambda app: app.action_download_cursor(),
         ),
         Action(
+            "result.auto",
+            "Auto select best subtitle by file quality",
+            "result",
+            "a",
+            lambda app: app.action_auto_cursor(),
+        ),
+        Action(
             "result.copy-url",
             "Copy selected public subtitle URL",
             "result",

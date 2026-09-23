@@ -7,8 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from library.subtitle_verifier import SubtitleVerifier
+from tui.auto_selector import AutoSubtitleSelector
 from tui.config import ApplicationConfig
-from tui.domain import EngineMode, Provider, SearchRequest, should_try_next_candidate
+from tui.domain import (
+    EngineMode,
+    Provider,
+    SearchRequest,
+    should_try_next_candidate,
+)
 from tui.jobs import JobCoordinator
 from tui.providers.base import ProviderAdapter
 from tui.search import SearchCoordinator
@@ -37,6 +43,7 @@ class HeadlessAllProvidersRunner:
         *,
         coordinator: SearchCoordinator | None = None,
         jobs: JobCoordinator | None = None,
+        auto_selector: AutoSubtitleSelector | None = None,
         emit: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
@@ -49,6 +56,7 @@ class HeadlessAllProvidersRunner:
             if config.general.verify_subtitles
             else None,
         )
+        self.auto_selector = auto_selector or AutoSubtitleSelector(self.jobs)
         self.emit = emit or print
 
     def run(
@@ -119,54 +127,76 @@ class HeadlessAllProvidersRunner:
                     )
                     continue
 
-                download = self.jobs.download(result.candidates[0], media)
-                # A rejected subtitle (bad coverage, wrong language, corrupt
-                # format) means that candidate was bad, not the request: walk
-                # down the ranked list instead of failing the whole file. The
-                # same holds for per-candidate download errors (bad file_id,
-                # unreadable response); account-wide failures (auth/quota) stop
-                # immediately since every candidate would fail identically.
-                candidate_index = 1
-                while (
-                    download.conflict_path is None
-                    and not download.succeeded
-                    and should_try_next_candidate(download)
-                    and candidate_index < len(result.candidates)
-                ):
-                    rejected = result.candidates[candidate_index - 1]
-                    verb = (
-                        "Rejected"
-                        if download.verification_failed
-                        else "Download failed for"
+                if self.config.general.auto_selection:
+                    selection = self.auto_selector.run(
+                        result.candidates,
+                        media,
+                        requested_language=request.language,
+                        sync=sync_policy == "always",
+                        force_utf8=self.config.general.opt_force_utf8,
+                        clean=self.config.cleaning.enabled,
+                        ads_path=self.config.cleaning.ads_file_path,
+                        ads_separator=self.config.cleaning.separator,
                     )
-                    self.emit(
-                        f"Warning: {verb} {rejected.release or rejected.key}: "
-                        f"{download.error}. Trying next candidate."
+                    for error in selection.provider_errors:
+                        self.emit(f"Warning: {error}")
+                    if selection.download is None or selection.candidate is None:
+                        message = selection.error or selection.decision.reason
+                        if selection.decision.manual_required and not selection.error:
+                            self.emit(
+                                f"Notice: Auto needs a manual choice for {media}: "
+                                f"{message}"
+                            )
+                        else:
+                            self.emit(
+                                f"Error: Could not automatically select subtitles "
+                                f"for {media}: {message}"
+                            )
+                        continue
+                    postprocess = selection.postprocess
+                    download = selection.download
+                else:
+                    download = self.jobs.download(result.candidates[0], media)
+                    candidate_index = 1
+                    while (
+                        download.conflict_path is None
+                        and not download.succeeded
+                        and should_try_next_candidate(download)
+                        and candidate_index < len(result.candidates)
+                    ):
+                        rejected = result.candidates[candidate_index - 1]
+                        verb = (
+                            "Rejected"
+                            if download.verification_failed
+                            else "Download failed for"
+                        )
+                        self.emit(
+                            f"Warning: {verb} {rejected.release or rejected.key}: "
+                            f"{download.error}. Trying next candidate."
+                        )
+                        download = self.jobs.download(
+                            result.candidates[candidate_index], media
+                        )
+                        candidate_index += 1
+                    if download.conflict_path is not None:
+                        self.emit(
+                            f"Error: Subtitle already exists: {download.conflict_path}"
+                        )
+                        continue
+                    if not download.succeeded:
+                        self.emit(
+                            f"Error: Could not download subtitles for {media}: "
+                            f"{download.error or 'download failed'}"
+                        )
+                        continue
+                    postprocess = self.jobs.postprocess(
+                        download,
+                        force_utf8=self.config.general.opt_force_utf8,
+                        clean=self.config.cleaning.enabled,
+                        sync=sync_policy == "always",
+                        ads_path=self.config.cleaning.ads_file_path,
+                        ads_separator=self.config.cleaning.separator,
                     )
-                    download = self.jobs.download(
-                        result.candidates[candidate_index], media
-                    )
-                    candidate_index += 1
-                if download.conflict_path is not None:
-                    self.emit(
-                        f"Error: Subtitle already exists: {download.conflict_path}"
-                    )
-                    continue
-                if not download.succeeded:
-                    self.emit(
-                        f"Error: Could not download subtitles for {media}: "
-                        f"{download.error or 'download failed'}"
-                    )
-                    continue
-
-                postprocess = self.jobs.postprocess(
-                    download,
-                    force_utf8=self.config.general.opt_force_utf8,
-                    clean=self.config.cleaning.enabled,
-                    sync=sync_policy == "always",
-                    ads_path=self.config.cleaning.ads_file_path,
-                    ads_separator=self.config.cleaning.separator,
-                )
                 for warning in (
                     postprocess.utf8_error,
                     postprocess.clean_error,

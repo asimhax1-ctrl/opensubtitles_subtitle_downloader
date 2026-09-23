@@ -30,6 +30,7 @@ from textual.widgets import (
 )
 
 from library.subtitle_verifier import SubtitleVerifier
+from tui.auto_selector import AutoSelectionResult, AutoSubtitleSelector
 from tui.config import (
     ApplicationConfig,
     ConfigDiff,
@@ -444,6 +445,7 @@ class SubsApp(App):
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
         Binding("enter", "download_cursor", "Download", show=False),
+        Binding("a", "auto_cursor", "Auto choose subtitle", show=False),
         Binding("p", "preview", "Preview", show=False),
         Binding("y", "copy_url", "Copy URL", show=False),
         Binding("m", "toggle_all_providers", "All providers", show=False),
@@ -477,6 +479,7 @@ class SubsApp(App):
         *,
         coordinator: SearchCoordinator | None = None,
         jobs: JobCoordinator | None = None,
+        auto_selector: AutoSubtitleSelector | None = None,
         recursive_search: bool = False,
         output_directory: str | Path | None = None,
         language_resolution: tuple[str, str] | None = None,
@@ -573,6 +576,7 @@ class SubsApp(App):
             if self.application_config.general.verify_subtitles
             else None,
         )
+        self.auto_selector = auto_selector or AutoSubtitleSelector(self.jobs)
         self.keymap = Keymap()
         self._rebuild_keymap()
         self.last_search_request: SearchRequest | None = None
@@ -808,7 +812,7 @@ class SubsApp(App):
         self._refresh_all()
         self.call_after_refresh(self._focus_results)
         if result.candidates and self.application_config.general.auto_selection:
-            self.action_download_cursor()
+            self.action_auto_cursor()
 
     def _focus_results(self) -> None:
         if self.candidates and self.state.active_view == "search":
@@ -1117,6 +1121,110 @@ class SubsApp(App):
         self._pending_download = candidate
         self.run_download(item.key, candidate, False)
 
+    def action_auto_cursor(self) -> None:
+        item = self.state.active_item
+        if item is None:
+            item = next(
+                (
+                    queued
+                    for queued in self.state.queue
+                    if queued.status is QueueStatus.FAILED
+                ),
+                None,
+            )
+        if item is None or not self.candidates or self.downloading:
+            return
+        self.run_auto(item.key, list(self.candidates), item.language)
+
+    @work(thread=True, exclusive=True, group="download")
+    def run_auto(
+        self,
+        item_key: str,
+        candidates: list[Candidate],
+        requested_language: str,
+    ) -> None:
+        self.call_from_thread(self._auto_started, item_key, candidates[0].key)
+        item = next(item for item in self.state.queue if item.key == item_key)
+        sync_policy = self.application_config.general.sync_audio_to_subs
+        sync = sync_policy == "always"
+        sync_cancel = threading.Event() if sync else None
+        try:
+            result = self.auto_selector.run(
+                candidates,
+                item.path,
+                requested_language=requested_language,
+                sync=sync,
+                clean=(
+                    self.application_config.cleaning.enabled
+                    and sync_policy != "ask"
+                ),
+                force_utf8=self.application_config.general.opt_force_utf8,
+                ads_path=self.application_config.cleaning.ads_file_path,
+                ads_separator=self.application_config.cleaning.separator,
+                sync_output=self._forward_sync_output if sync else None,
+                sync_cancel_event=sync_cancel,
+                sync_started=(
+                    lambda path: self.call_from_thread(
+                        self._sync_started,
+                        item_key,
+                        path,
+                        sync_cancel,
+                    )
+                    if sync
+                    else None
+                ),
+            )
+        except Exception as exc:
+            self.call_from_thread(
+                self._download_crashed,
+                item_key,
+                f"Auto selection failed: {type(exc).__name__}: {exc}",
+            )
+            return
+        self.call_from_thread(self._auto_finished, item_key, result, sync_policy)
+
+    def _auto_started(self, item_key: str, candidate_key: str) -> None:
+        item = next(item for item in self.state.queue if item.key == item_key)
+        item.error = None
+        item.status = QueueStatus.AWAITING_PICK
+        self.last_error = None
+        self.notice = "Evaluating subtitle content…"
+        self.state.begin_download(item_key, candidate_key)
+        self.downloading = True
+        self._refresh_all()
+
+    def _auto_finished(
+        self,
+        item_key: str,
+        result: AutoSelectionResult,
+        sync_policy: str,
+    ) -> None:
+        self.downloading = False
+        if result.download is None or result.candidate is None:
+            message = result.error or result.decision.reason
+            item = next(item for item in self.state.queue if item.key == item_key)
+            if result.decision.manual_required or self.candidates:
+                item.status = QueueStatus.AWAITING_PICK
+                self.notice = f"Auto needs a manual choice: {message}"
+                self.last_error = message
+                self._refresh_all()
+                return
+            self.state.mark_failed(item_key, message)
+            self.last_error = message
+            self._advance_queue()
+            return
+        if result.provider_errors:
+            self.notice = "Some providers failed; selected the best evaluated subtitle"
+        if sync_policy == "ask":
+            self._request_sync(item_key, result.candidate, result.download)
+            return
+        self._download_finished(
+            item_key,
+            result.candidate,
+            result.download,
+            result.postprocess,
+        )
+
     def action_copy_url(self) -> None:
         candidate = self.current_candidate()
         if candidate is None:
@@ -1421,7 +1529,7 @@ class SubsApp(App):
     def action_help(self) -> None:
         self.notify(
             "F1–F4 views · e engine · l language · / query · "
-            "j/k move · Enter download · m All providers · q quit",
+            "j/k move · Enter download · a Auto quality · m All providers · q quit",
             title="Command deck shortcuts",
             timeout=8,
         )
@@ -1487,6 +1595,8 @@ class SubsApp(App):
             self.action_open_palette()
         elif button_id == "download-selected":
             self.action_download_cursor()
+        elif button_id == "auto-selected":
+            self.action_auto_cursor()
         elif button_id == "preview-selected":
             self.action_preview()
         elif button_id == "copy-url":

@@ -23,6 +23,7 @@ class DetailPane(VerticalScroll):
                 id="download-selected",
                 variant="primary",
             )
+            yield Button("Auto  a", id="auto-selected", variant="success")
             yield Button("View  p", id="preview-selected")
             yield Button("URL  y", id="copy-url")
 
@@ -32,6 +33,7 @@ class DetailPane(VerticalScroll):
         provider = self.query_one("#detail-provider", Static)
         detail = self.query_one("#detail-kv", Static)
         download = self.query_one("#download-selected", Button)
+        auto = self.query_one("#auto-selected", Button)
         preview = self.query_one("#preview-selected", Button)
         copy = self.query_one("#copy-url", Button)
         if candidate is None:
@@ -39,6 +41,7 @@ class DetailPane(VerticalScroll):
             provider.update("")
             detail.update("")
             download.disabled = True
+            auto.disabled = True
             preview.disabled = True
             copy.disabled = True
             return
@@ -60,5 +63,6 @@ class DetailPane(VerticalScroll):
             f"AI {'yes' if candidate.ai_translated else 'no'}"
         )
         download.disabled = False
+        auto.disabled = False
         preview.disabled = False
         copy.disabled = candidate.public_url is None

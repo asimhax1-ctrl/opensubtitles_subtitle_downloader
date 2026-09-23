@@ -263,7 +263,7 @@ def test_all_providers_mode_dispatches_all_providers_search(configured_app):
     asyncio.run(run())
 
 
-def test_all_providers_auto_selection_downloads_first_ranked_candidate(
+def test_all_providers_auto_selection_uses_shared_selector(
     configured_app,
 ):
     app, coordinator = configured_app
@@ -287,17 +287,49 @@ def test_all_providers_auto_selection_downloads_first_ranked_candidate(
     app.application_config.general.preferred_backend = EngineMode.ALL_PROVIDERS
     app.application_config.general.auto_selection = True
     app.set_reactive(SubsApp.all_providers_mode, True)
-    downloaded = []
-    app.run_download = (
-        lambda _item_key, candidate, _overwrite: downloaded.append(candidate)
+    selected = []
+    app.run_auto = (
+        lambda item_key, candidates, language: selected.append(
+            (item_key, candidates, language)
+        )
     )
 
     async def run():
         async with app.run_test() as pilot:
             await pilot.pause(0.3)
-            assert [candidate.provider_id for candidate in downloaded] == ["best"]
+            assert len(selected) == 1
+            assert [candidate.provider_id for candidate in selected[0][1]] == [
+                "best",
+                "lower",
+            ]
+            assert selected[0][2] == "ar"
 
     asyncio.run(run())
+
+
+def test_auto_action_uses_auto_selector_instead_of_manual_download(configured_app):
+    app, coordinator = configured_app
+    coordinator.candidates = coordinator.candidates[:1]
+    calls = []
+    app.run_auto = lambda item_key, candidates, language: calls.append(
+        (item_key, candidates, language)
+    )
+    app.run_download = lambda *_args: pytest.fail(
+        "Auto must not use the manual single-candidate download path"
+    )
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.pause(0.3)
+            app.candidates = coordinator.candidates
+            app.action_auto_cursor()
+            await pilot.pause()
+
+    asyncio.run(run())
+    assert calls == [
+        (app.state.active_item.key, coordinator.candidates, "ar"),
+    ]
+    assert any(binding.key == "a" for binding in app.BINDINGS)
 
 
 def test_all_providers_raw_dictionary_config_uses_canonical_mode():
@@ -849,6 +881,7 @@ def test_results_and_multilingual_detail_are_visible(configured_app):
             # it still catches a renderer that grows without bound.
             assert detail.count("\n") <= 15
             assert str(app.query_one("#download-selected", Button).label) == "Get  ↵"
+            assert str(app.query_one("#auto-selected", Button).label) == "Auto  a"
             assert str(app.query_one("#preview-selected", Button).label) == "View  p"
             assert str(app.query_one("#copy-url", Button).label) == "URL  y"
 
@@ -1260,11 +1293,11 @@ def test_stale_search_completion_cannot_replace_current_results(configured_app):
     asyncio.run(run())
 
 
-def test_auto_selection_uses_best_visible_candidate(configured_app):
+def test_auto_selection_uses_shared_auto_action(configured_app):
     app, _ = configured_app
     calls = []
     app.application_config.general.auto_selection = True
-    app.action_download_cursor = lambda: calls.append(app.current_candidate().key)
+    app.action_auto_cursor = lambda: calls.append(app.current_candidate().key)
 
     async def run():
         async with app.run_test() as pilot:

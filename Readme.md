@@ -356,12 +356,19 @@ Search every configured provider in a no-TUI batch:
 python download_subs.py --no-tui --backend all-providers "season"
 ```
 
-In the TUI, `auto_selection` controls whether the highest-ranked result is
-downloaded automatically or shown for selection. No-TUI always downloads the
-highest-ranked result for the selected search mode, regardless of
-`auto_selection`. Provider or file failures are reported without stopping later
-files in the batch. Existing subtitle files are skipped in no-TUI mode rather
-than overwritten.
+In the TUI, `auto_selection` controls whether the shared Auto quality selector
+runs after search or leaves the candidates for manual selection. You can also
+run it on demand with the `Auto` button or `a`; `Enter` still downloads only the
+currently selected candidate. Auto evaluates up to four downloaded subtitle
+files (with at most eight download attempts), ranks their actual content, then
+saves only the winner beside the video. If the evidence is ambiguous, choose a
+candidate manually. Format is preserved, and synchronization runs only after
+selection when enabled.
+
+In no-TUI mode, `auto_selection: true` uses the same bounded Auto selector.
+When it is false, the existing first-ranked download behavior is retained.
+Provider or file failures are reported without stopping later files in the
+batch. Existing subtitle files are skipped rather than overwritten.
 
 ### Unattended batch automation
 
@@ -424,6 +431,7 @@ view. The most useful keys are:
 | ---------------------- | ------------------------------------------------------------- |
 | `j`, `k` or arrow keys | Move through results                                          |
 | `Enter`                | Download the selected result                                  |
+| `a`                    | Auto-select by subtitle-file quality                          |
 | `/`                    | Edit the query; press `Enter` to search                       |
 | `Esc`                  | Return focus to the active workspace                          |
 | `L` or `l`             | Select a language                                             |

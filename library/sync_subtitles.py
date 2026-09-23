@@ -266,12 +266,16 @@ def sync_subs_audio(
     subtitle_format = subtitle_path.suffix.lower().lstrip(".")
     executable = _find_ffsubsync()
     with TemporaryDirectory(prefix=".sync-", dir=subtitle_path.parent) as temporary:
+        input_path = Path(temporary) / f"input{subtitle_path.suffix}"
+        input_path.write_bytes(
+            re.sub(rb"\r+\n", b"\n", subtitle_path.read_bytes()).replace(b"\r", b"\n")
+        )
         output_path = Path(temporary) / f"synced{subtitle_path.suffix}"
         _command = [
             executable,
             str(media_path),
             "-i",
-            str(subtitle_path),
+            str(input_path),
             "-o",
             str(output_path),
             "--encoding",

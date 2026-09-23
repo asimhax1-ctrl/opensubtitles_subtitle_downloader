@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import srt
 
 from library import sync_subtitles
 
@@ -82,12 +83,71 @@ def test_sync_subs_audio_streams_combined_ffsubsync_output(monkeypatch, tmp_path
     ]
     assert commands[0][1]["stderr"] is sync_subtitles.subprocess.STDOUT
     assert commands[0][1]["text"] is True
-    assert commands[0][0][commands[0][0].index("-i") + 1] == str(subtitle)
+    input_path = Path(commands[0][0][commands[0][0].index("-i") + 1])
     output_path = Path(commands[0][0][commands[0][0].index("-o") + 1])
+    assert input_path != subtitle
+    assert input_path.parent == output_path.parent
+    assert input_path.suffix == subtitle.suffix
     assert output_path != subtitle
     assert output_path.suffix == subtitle.suffix
     assert subtitle.read_text(encoding="utf-8") == SYNCED_SRT
     assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    "newline",
+    ["\r\r\r\n", "\r\r\n", "\r\n", "\r"],
+    ids=("triple-crlf", "double-crlf", "crlf", "cr"),
+)
+def test_sync_normalizes_pathological_srt_in_temporary_input(
+    monkeypatch, tmp_path, newline
+):
+    media = tmp_path / "Arrival (2016).mkv"
+    subtitle = tmp_path / "ترجمة (2016).ar.srt"
+    original = ORIGINAL_SRT.replace("\n", newline).encode("utf-8")
+    media.touch()
+    subtitle.write_bytes(original)
+
+    def fake_run(command, **_kwargs):
+        input_path = Path(command[command.index("-i") + 1])
+        output_path = Path(command[command.index("-o") + 1])
+        assert input_path != subtitle
+        assert input_path.parent == output_path.parent
+        assert input_path.suffix == subtitle.suffix
+        assert subtitle.read_bytes() == original
+        normalized = input_path.read_bytes()
+        assert b"\r" not in normalized
+        assert normalized == ORIGINAL_SRT.encode("utf-8")
+        assert len(list(srt.parse(normalized.decode("utf-8")))) == 2
+        output_path.write_text(SYNCED_SRT, encoding="utf-8")
+
+    monkeypatch.setattr(sync_subtitles, "_find_ffsubsync", lambda: "ffs")
+    monkeypatch.setattr(sync_subtitles.subprocess, "run", fake_run)
+
+    assert sync_subtitles.sync_subs_audio(media, subtitle)
+    assert subtitle.read_text(encoding="utf-8") == SYNCED_SRT
+    assert list(tmp_path.glob(".sync-*")) == []
+
+
+def test_sync_failure_preserves_pathological_srt_bytes(monkeypatch, tmp_path):
+    subtitle = tmp_path / "Arrival (2016).ar.srt"
+    original = ORIGINAL_SRT.replace("\n", "\r\r\r\n").encode("utf-8")
+    subtitle.write_bytes(original)
+
+    def fake_run(command, **_kwargs):
+        input_path = Path(command[command.index("-i") + 1])
+        assert input_path != subtitle
+        assert b"\r" not in input_path.read_bytes()
+        assert subtitle.read_bytes() == original
+        Path(command[command.index("-o") + 1]).write_bytes(b"")
+
+    monkeypatch.setattr(sync_subtitles, "_find_ffsubsync", lambda: "ffs")
+    monkeypatch.setattr(sync_subtitles.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="empty"):
+        sync_subtitles.sync_subs_audio(tmp_path / "Arrival (2016).mkv", subtitle)
+    assert subtitle.read_bytes() == original
+    assert list(tmp_path.glob(".sync-*")) == []
 
 
 def test_sync_subs_audio_keeps_direct_terminal_output_without_callback(
@@ -316,10 +376,17 @@ def test_sync_subs_audio_preserves_ass_and_ssa_format(
     contents,
 ):
     subtitle = tmp_path / f"Movie.ar{suffix}"
-    subtitle.write_text(contents, encoding="utf-8")
+    original = contents.replace("\n", "\r\r\n").encode("utf-8")
+    subtitle.write_bytes(original)
     output_content = contents.replace("Example line", "Synced line")
 
     def fake_run(command, **_kwargs):
+        input_path = Path(command[command.index("-i") + 1])
+        assert input_path != subtitle
+        assert input_path.suffix == suffix
+        assert b"\r" not in input_path.read_bytes()
+        assert input_path.read_text(encoding="utf-8") == contents
+        assert subtitle.read_bytes() == original
         Path(command[command.index("-o") + 1]).write_text(
             output_content,
             encoding="utf-8",

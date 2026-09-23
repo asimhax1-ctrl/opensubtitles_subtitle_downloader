@@ -9,16 +9,30 @@ from tui.providers.base import StandardProviderAdapter, redact_secrets
 class SubDLAdapter(StandardProviderAdapter):
     provider = Provider.SUBDL
 
-    def download(self, candidate: Candidate, media_path: Path) -> DownloadResult:
+    def download(
+        self,
+        candidate: Candidate,
+        media_path: Path,
+        *,
+        download_limits=None,
+    ) -> DownloadResult:
         invalid = self._invalid_candidate(candidate, media_path)
         if invalid:
             return invalid
         try:
-            path = self.client.download_single_subtitle(
-                candidate.download_ref,
-                media_path,
-                candidate.language,
-            )
+            if download_limits is None:
+                path = self.client.download_single_subtitle(
+                    candidate.download_ref,
+                    media_path,
+                    candidate.language,
+                )
+            else:
+                path = self.client.download_single_subtitle(
+                    candidate.download_ref,
+                    media_path,
+                    candidate.language,
+                    download_limits=download_limits,
+                )
         except Exception as exc:
             return DownloadResult(
                 provider=self.provider,

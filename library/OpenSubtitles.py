@@ -1,6 +1,7 @@
 # Handles subtitle search and download through the OpenSubtitles API.
 import json
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import requests
@@ -322,20 +323,33 @@ class OpenSubtitles:
             )
             raise RuntimeError(f"OpenSubtitles download failed: {e}") from e
 
-    def save_subtitle(self, url, path):
+    def save_subtitle(self, url, path, max_bytes=None):
         """Download and save subtitle file from url to path"""
         try:
             response = requests.get(url, stream=True, timeout=10)
             response.raise_for_status()
+            length = response.headers.get("Content-Length")
+            if max_bytes is not None and length and int(length) > max_bytes:
+                raise ValueError("Subtitle payload exceeds the Auto download limit")
+            total = 0
             with open(path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
+                    total += len(chunk)
+                    if max_bytes is not None and total > max_bytes:
+                        raise ValueError(
+                            "Subtitle payload exceeds the Auto download limit"
+                        )
                     f.write(chunk)
             return True
         except requests.exceptions.RequestException as e:
             self.console.print(f"[bold red]Error downloading subtitle: {e}[/]")
+            with suppress(OSError):
+                Path(path).unlink(missing_ok=True)
             return False
         except Exception as e:
             self.console.print(f"[bold red]Unexpected error saving subtitle: {e}[/]")
+            with suppress(OSError):
+                Path(path).unlink(missing_ok=True)
             return False
 
     def process_media_file(self, media_path, language_choice, media_name=""):

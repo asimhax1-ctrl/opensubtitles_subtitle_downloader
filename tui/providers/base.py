@@ -66,7 +66,13 @@ class ProviderAdapter(Protocol):
 
     def search(self, request: SearchRequest) -> ProviderSearchResult: ...
 
-    def download(self, candidate: Candidate, media_path: Path) -> DownloadResult: ...
+    def download(
+        self,
+        candidate: Candidate,
+        media_path: Path,
+        *,
+        download_limits: Any | None = None,
+    ) -> DownloadResult: ...
 
     def health(self) -> HealthResult: ...
 

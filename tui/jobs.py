@@ -105,6 +105,7 @@ class JobCoordinator:
         media_path: str | Path,
         *,
         overwrite: bool = False,
+        download_limits: Any | None = None,
     ) -> DownloadResult:
         media = Path(media_path)
         adapter = self.adapters.get(candidate.provider)
@@ -151,6 +152,7 @@ class JobCoordinator:
                 destination,
                 overwrite,
                 self.verifier,
+                download_limits,
             )
         except OSError as exc:
             return DownloadResult(
@@ -167,13 +169,21 @@ class JobCoordinator:
         destination: Path,
         overwrite: bool,
         verifier: SubtitleVerifier | None = None,
+        download_limits: Any | None = None,
     ) -> DownloadResult:
         with TemporaryDirectory(
             prefix=".subtitle-download-",
             dir=destination,
         ) as temporary:
             staging_media = Path(temporary) / media.name
-            staged = adapter.download(candidate, staging_media)
+            if download_limits is None:
+                staged = adapter.download(candidate, staging_media)
+            else:
+                staged = adapter.download(
+                    candidate,
+                    staging_media,
+                    download_limits=download_limits,
+                )
             if not staged.succeeded or staged.subtitle_path is None:
                 return DownloadResult(
                     provider=candidate.provider,
@@ -187,6 +197,15 @@ class JobCoordinator:
                     provider=candidate.provider,
                     media_path=media,
                     error="Provider wrote outside the download staging directory",
+                )
+            if (
+                download_limits is not None
+                and staged_path.stat().st_size > download_limits.max_payload_bytes
+            ):
+                return DownloadResult(
+                    provider=candidate.provider,
+                    media_path=media,
+                    error="Subtitle payload exceeds the Auto download limit",
                 )
 
             detected = normalize_subtitle_format(

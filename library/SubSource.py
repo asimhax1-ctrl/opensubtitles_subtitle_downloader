@@ -112,6 +112,37 @@ class _SevenZipArchive:
         )
         return result.stdout
 
+    def read_limited(self, name, max_bytes):
+        process = subprocess.Popen(
+            [self._exe, "e", "-so", self._path, name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            data = bytearray()
+            while len(data) <= max_bytes:
+                chunk = process.stdout.read(min(64 * 1024, max_bytes + 1 - len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
+            if len(data) > max_bytes:
+                process.terminate()
+                process.wait()
+                raise ValueError(
+                    "Subtitle archive member exceeds the Auto member limit"
+                )
+            process.wait()
+            if process.returncode:
+                raise subprocess.CalledProcessError(
+                    process.returncode,
+                    process.args,
+                )
+            return bytes(data)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait()
+
     def close(self):
         # Nothing held open; the CLI is invoked per-operation.
         return None
@@ -539,6 +570,7 @@ class SubSource:
         video_season,
         video_episode,
         is_movie,
+        download_limits=None,
     ):
         """Stream a SubSource download (zip or rar) and extract the best match.
 
@@ -556,8 +588,21 @@ class SubSource:
         )
         archive = None
         try:
+            if download_limits is not None:
+                length = response.headers.get("Content-Length")
+                if length and int(length) > download_limits.max_payload_bytes:
+                    raise ValueError(
+                        "Subtitle archive exceeds the Auto download limit"
+                    )
             with open(archive_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
+                    if (
+                        download_limits is not None
+                        and f.tell() + len(chunk) > download_limits.max_payload_bytes
+                    ):
+                        raise ValueError(
+                            "Subtitle archive exceeds the Auto download limit"
+                        )
                     f.write(chunk)
 
             if not is_movie and (video_season is None or video_episode is None):
@@ -578,6 +623,12 @@ class SubSource:
                 for n in archive.names()
                 if Path(n).suffix.lower() in (".ass", ".srt", ".ssa", ".vtt", ".sub")
             ]
+            archive_names = archive.names()
+            if (
+                download_limits is not None
+                and len(archive_names) > download_limits.max_archive_members
+            ):
+                raise ValueError("Subtitle archive has too many members for Auto")
             if not sub_files:
                 self.console.print(
                     "[bold red]Error: No subtitle files found in the archive.[/]"
@@ -604,7 +655,24 @@ class SubSource:
             selected_subtitle_path = None
             try:
                 sf = matching_subtitle or sub_files[0]
-                decoded_content = self._decode_bytes(archive.read(sf))
+                if download_limits is None:
+                    member_bytes = archive.read(sf)
+                elif hasattr(archive, "open"):
+                    with archive.open(sf) as source:
+                        member_bytes = source.read(download_limits.max_member_bytes + 1)
+                else:
+                    member_bytes = archive.read_limited(
+                        sf,
+                        download_limits.max_member_bytes,
+                    )
+                if (
+                    download_limits is not None
+                    and len(member_bytes) > download_limits.max_member_bytes
+                ):
+                    raise ValueError(
+                        "Subtitle archive member exceeds the Auto member limit"
+                    )
+                decoded_content = self._decode_bytes(member_bytes)
 
                 ext = Path(sf).suffix.lower()
                 if ext not in (".ass", ".ssa", ".srt", ".vtt", ".sub"):
@@ -646,7 +714,13 @@ class SubSource:
             )
         return selected_subtitle_path
 
-    def download_single_subtitle(self, subtitle, video_input_path, language_choice=""):
+    def download_single_subtitle(
+        self,
+        subtitle,
+        video_input_path,
+        language_choice="",
+        download_limits=None,
+    ):
         """Download one SubSource subtitle. SubSource always serves an archive
         (.zip for newer uploads, .rar for some older ones)."""
         try:
@@ -670,6 +744,7 @@ class SubSource:
                 video_season,
                 video_episode,
                 is_movie,
+                download_limits,
             )
         except requests.exceptions.RequestException as e:
             self.console.print(f"[bold red]Error downloading subtitle: {e}[/]")

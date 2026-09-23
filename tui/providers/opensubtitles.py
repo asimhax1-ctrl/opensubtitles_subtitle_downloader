@@ -14,7 +14,13 @@ from tui.providers.base import StandardProviderAdapter, redact_secrets
 class OpenSubtitlesAdapter(StandardProviderAdapter):
     provider = Provider.OPENSUBTITLES
 
-    def download(self, candidate: Candidate, media_path: Path) -> DownloadResult:
+    def download(
+        self,
+        candidate: Candidate,
+        media_path: Path,
+        *,
+        download_limits=None,
+    ) -> DownloadResult:
         invalid = self._invalid_candidate(candidate, media_path)
         if invalid:
             return invalid
@@ -31,7 +37,15 @@ class OpenSubtitlesAdapter(StandardProviderAdapter):
                     "row fails, the API quota/login is the likely cause "
                     "(press r to probe)"
                 )
-            if not self.client.save_subtitle(link, target):
+            if download_limits is None:
+                saved = self.client.save_subtitle(link, target)
+            else:
+                saved = self.client.save_subtitle(
+                    link,
+                    target,
+                    max_bytes=download_limits.max_payload_bytes,
+                )
+            if not saved:
                 raise RuntimeError(
                     "Provider returned a link but the subtitle could not be "
                     "saved. Try the next candidate"

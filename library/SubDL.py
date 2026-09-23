@@ -336,9 +336,20 @@ class SubDL:
             return value
         return self.download_base_url + value
 
-    def _download_single_file(self, rel_url, fmt, video_input_path, language_choice):
+    def _download_single_file(
+        self,
+        rel_url,
+        fmt,
+        video_input_path,
+        language_choice,
+        download_limits=None,
+    ):
         abs_url = self._download_url(rel_url)
-        response = requests.get(abs_url, timeout=10)
+        response = requests.get(
+            abs_url,
+            timeout=10,
+            **({"stream": True} if download_limits is not None else {}),
+        )
         response.raise_for_status()
         ext = f".{fmt}" if fmt in ("srt", "ass", "ssa", "vtt", "sub") else ".srt"
         target_filename = self._target_subtitle_name(
@@ -347,7 +358,20 @@ class SubDL:
         target_path = self._output_path(video_input_path, target_filename)
         if report_existing_subtitle(target_path, self.console):
             return None
-        decoded = self._decode_bytes(response.content)
+        if download_limits is None:
+            content = response.content
+        else:
+            length = response.headers.get("Content-Length")
+            if length and int(length) > download_limits.max_payload_bytes:
+                raise ValueError("Subtitle payload exceeds the Auto download limit")
+            content = bytearray()
+            for chunk in response.iter_content(chunk_size=8192):
+                content.extend(chunk)
+                if len(content) > download_limits.max_payload_bytes:
+                    raise ValueError(
+                        "Subtitle payload exceeds the Auto download limit"
+                    )
+        decoded = self._decode_bytes(bytes(content))
         with open(target_path, "w", encoding="utf-8") as f:
             f.write(decoded)
         self.console.print(
@@ -363,6 +387,7 @@ class SubDL:
         video_season,
         video_episode,
         is_movie,
+        download_limits=None,
     ):
         abs_url = self._download_url(rel_url)
         response = requests.get(abs_url, stream=True, timeout=10)
@@ -373,6 +398,11 @@ class SubDL:
         )
         with open(zip_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
+                if (
+                    download_limits is not None
+                    and f.tell() + len(chunk) > download_limits.max_payload_bytes
+                ):
+                    raise ValueError("Subtitle archive exceeds the Auto download limit")
                 f.write(chunk)
 
         if not is_movie and (video_season is None or video_episode is None):
@@ -387,6 +417,11 @@ class SubDL:
         try:
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 extracted_files = zip_ref.namelist()
+                if (
+                    download_limits is not None
+                    and len(extracted_files) > download_limits.max_archive_members
+                ):
+                    raise ValueError("Subtitle archive has too many members for Auto")
                 lowered = {name: name.lower() for name in extracted_files}
                 ass_files = [f for f in extracted_files if lowered[f].endswith(".ass")]
                 ssa_files = [f for f in extracted_files if lowered[f].endswith(".ssa")]
@@ -421,10 +456,29 @@ class SubDL:
                 if matching_subtitle is None:
                     return None
 
+                if download_limits is not None:
+                    member = zip_ref.getinfo(matching_subtitle)
+                    if member.file_size > download_limits.max_member_bytes:
+                        raise ValueError(
+                            "Subtitle archive member exceeds the Auto member limit"
+                        )
+
                 try:
                     subtitle_file = matching_subtitle
                     with zip_ref.open(subtitle_file) as source:
-                        decoded_content = self._decode_bytes(source.read())
+                        member_bytes = source.read(
+                            download_limits.max_member_bytes + 1
+                            if download_limits is not None
+                            else -1
+                        )
+                    if (
+                        download_limits is not None
+                        and len(member_bytes) > download_limits.max_member_bytes
+                    ):
+                        raise ValueError(
+                            "Subtitle archive member exceeds the Auto member limit"
+                        )
+                    decoded_content = self._decode_bytes(member_bytes)
 
                     # The preferred name keeps the archive member's own
                     # extension, so an ASS or SSA match is never renamed .srt.
@@ -463,7 +517,13 @@ class SubDL:
             )
         return selected_subtitle_path
 
-    def download_single_subtitle(self, subtitle, video_input_path, language_choice=""):
+    def download_single_subtitle(
+        self,
+        subtitle,
+        video_input_path,
+        language_choice="",
+        download_limits=None,
+    ):
         """Download one subtitle, preferring an unpacked file over an archive."""
         attrs = subtitle.get("attributes", {}) if isinstance(subtitle, dict) else {}
         try:
@@ -477,7 +537,11 @@ class SubDL:
             )
             if single_url:
                 return self._download_single_file(
-                    single_url, single_format, video_input_path, language_choice
+                    single_url,
+                    single_format,
+                    video_input_path,
+                    language_choice,
+                    download_limits,
                 )
 
             zip_url = attrs.get("url", "")
@@ -491,6 +555,7 @@ class SubDL:
                 video_season,
                 video_episode,
                 is_movie,
+                download_limits,
             )
         except requests.exceptions.RequestException as e:
             self.console.print(f"[bold red]Error downloading subtitle: {e}[/]")
